@@ -159,7 +159,7 @@ rtk env \
   CUDA_VISIBLE_DEVICES=1 \
   VLLM_LOGGING_LEVEL=WARNING \
   UV_PROJECT_ENVIRONMENT=/mnt/ssd1/shreyansh/home_dir/asr_experiments/.venv \
-  uv run inference/vllm_static_fp8/bench_audio_prefix_cudagraph.py \
+  uv run inference/vllm_static_fp8/benchmarks/bench_audio_prefix_cudagraph.py \
     --warmup 3 \
     --repeats 10 \
     --replay-checks 3 \

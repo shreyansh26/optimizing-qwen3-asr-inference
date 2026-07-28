@@ -84,14 +84,14 @@ metadata path and candidate:
 ```bash
 CUDA_VISIBLE_DEVICES=1 \
 UV_PROJECT_ENVIRONMENT=/mnt/ssd1/shreyansh/home_dir/asr_experiments/.venv \
-uv run inference/vllm_static_fp8/bench_audio_cpu_metadata_pack.py
+uv run inference/vllm_static_fp8/benchmarks/bench_audio_cpu_metadata_pack.py
 ```
 
 Service launcher:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 PORT=8091 \
-  inference/run_vllm_fp8_static_qk_prefill_audio_cpu_metadata_pack.sh
+  inference/experimental_launchers/run_vllm_fp8_static_qk_prefill_audio_cpu_metadata_pack.sh
 ```
 
 ### CUDA helper

@@ -1,3 +1,5 @@
+#!/usr/bin/env python3
+
 # import torch
 # from qwen_asr import Qwen3ASRModel
 

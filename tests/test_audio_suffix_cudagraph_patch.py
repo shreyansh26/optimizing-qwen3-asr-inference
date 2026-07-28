@@ -14,7 +14,9 @@ from torch import nn
 
 
 PATCH_DIR = Path(__file__).resolve().parents[1] / "inference" / "vllm_static_fp8"
+BENCHMARK_DIR = PATCH_DIR / "benchmarks"
 sys.path.insert(0, str(PATCH_DIR))
+sys.path.insert(0, str(BENCHMARK_DIR))
 
 import audio_suffix_cudagraph_patch as suffix_patch  # noqa: E402
 import bench_audio_suffix_cudagraph as suffix_bench  # noqa: E402

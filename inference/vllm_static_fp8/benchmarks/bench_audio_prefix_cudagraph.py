@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 import statistics
+import sys
 import threading
 import time
 from typing import Callable
@@ -13,7 +15,10 @@ from typing import Callable
 import torch
 from torch import nn
 
-from audio_cpu_metadata_pack_patch import run_audio_prefix_eager
+PATCH_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PATCH_DIR))
+
+from audio_cpu_metadata_pack_patch import run_audio_prefix_eager  # noqa: E402
 from audio_prefix_cudagraph_patch import (
     _MAX_CACHE_ENTRIES,
     _NATURAL_PACKED_ROWS,
@@ -24,8 +29,8 @@ from audio_prefix_cudagraph_patch import (
     _natural_feature_lengths_for_rows,
     ExactShapeAudioPrefixGraphCache,
     run_audio_prefix_with_device_metadata,
-)
-from vllm.utils.torch_utils import async_tensor_h2d
+)  # noqa: E402
+from vllm.utils.torch_utils import async_tensor_h2d  # noqa: E402
 
 
 class PrefixOnlyEncoder(nn.Module):

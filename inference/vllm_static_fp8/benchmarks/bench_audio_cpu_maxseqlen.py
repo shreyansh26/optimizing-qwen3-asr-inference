@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import statistics
+import sys
 import time
 
 import torch
 
-from audio_cpu_maxseqlen_patch import STATIC_MAX_SEQLEN
+PATCH_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PATCH_DIR))
+
+from audio_cpu_maxseqlen_patch import STATIC_MAX_SEQLEN  # noqa: E402
 
 
 def _measure_host_item_us(value: torch.Tensor, repeats: int, layers: int) -> float:

@@ -4,14 +4,19 @@ from __future__ import annotations
 
 import argparse
 from itertools import accumulate
+from pathlib import Path
 import statistics
+import sys
 import time
 from typing import Callable
 
 import torch
 
-from audio_cpu_metadata_pack_patch import pack_valid_rows
-from vllm.utils.torch_utils import async_tensor_h2d
+PATCH_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PATCH_DIR))
+
+from audio_cpu_metadata_pack_patch import pack_valid_rows  # noqa: E402
+from vllm.utils.torch_utils import async_tensor_h2d  # noqa: E402
 
 
 def _metadata(chunks: int, rows: int) -> tuple[torch.Tensor, list[int]]:

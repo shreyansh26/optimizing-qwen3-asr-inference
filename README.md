@@ -132,12 +132,8 @@ bash inference/run_vllm_fp8_static.sh
 # Static FP8 plus fused Q/K RMSNorm, MRoPE, and KV-cache update.
 bash inference/run_vllm_fp8_static_qk_prefill.sh
 
-# The fused decoder path plus CPU audio metadata and exact Triton row packing.
-bash inference/run_vllm_fp8_static_qk_prefill_audio_cpu_metadata_pack.sh
-
 # Current best: CPU metadata plus natural-only prefix and suffix graph caches.
-PORT=8091 \
-  bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh
+bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh
 ```
 
 The inference and benchmark scripts reset vLLM prefix cache before each run.
@@ -547,8 +543,7 @@ the next precision:
 | `fp8_dynamic` | `bash inference/run_vllm_fp8_dynamic.sh` |
 | `fp8_static` | `bash inference/run_vllm_fp8_static.sh` |
 | `fp8_static_qk_prefill` | `bash inference/run_vllm_fp8_static_qk_prefill.sh` |
-| `fp8_static_qk_audio_cpu_metadata` | `bash inference/run_vllm_fp8_static_qk_prefill_audio_cpu_metadata_pack.sh` |
-| `fp8_static_qk_prefill_audio_prefix_suffix_cudagraph` | `PORT=8091 MODEL=/mnt/ssd2/hf_models/models--Qwen--Qwen3-ASR-1.7B/snapshots/7278e1e70fe206f11671096ffdd38061171dd6e5 bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh --gpu-memory-utilization 0.75` |
+| `fp8_static_qk_prefill_audio_prefix_suffix_cudagraph` | `bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh` |
 
 Use precision-specific output roots. This keeps prediction files isolated and
 allows `analyse_results.py` to infer the precision from the recorded path:

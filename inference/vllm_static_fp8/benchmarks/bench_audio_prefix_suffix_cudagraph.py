@@ -5,29 +5,36 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+import sys
 import threading
 
 import torch
+
+PATCH_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PATCH_DIR))
 
 from audio_cpu_metadata_pack_patch import (
     _build_cpu_metadata,
     run_audio_prefix_eager,
     run_audio_suffix_eager,
-)
+)  # noqa: E402
 from audio_prefix_cudagraph_patch import (
     _NATURAL_PACKED_ROWS,
     ExactShapeAudioPrefixGraphCache,
+)  # noqa: E402
+from audio_suffix_cudagraph_patch import (  # noqa: E402
+    ExactShapeAudioSuffixGraphCache,
 )
-from audio_suffix_cudagraph_patch import ExactShapeAudioSuffixGraphCache
 from bench_audio_prefix_cudagraph import (
     _median_cuda_us,
     _median_host_call_us,
-)
+)  # noqa: E402
 from bench_audio_suffix_cudagraph import (
     _initialize_single_gpu_distributed,
     _new_encoder,
-)
-from vllm.utils.torch_utils import async_tensor_h2d
+)  # noqa: E402
+from vllm.utils.torch_utils import async_tensor_h2d  # noqa: E402
 
 
 _REPRESENTATIVE_FEATURE_LENGTHS = {

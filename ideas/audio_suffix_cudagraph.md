@@ -189,7 +189,7 @@ ASR_AUDIO_CPU_METADATA_PACK=1
 Launcher:
 
 ```bash
-inference/run_vllm_fp8_static_qk_prefill_audio_suffix_cudagraph.sh
+inference/experimental_launchers/run_vllm_fp8_static_qk_prefill_audio_suffix_cudagraph.sh
 ```
 
 ## CUDA helper gate
@@ -201,7 +201,7 @@ cd /mnt/ssd1/shreyansh/home_dir/asr_experiments_worktrees/audio-suffix-cudagraph
 rtk env \
   CUDA_VISIBLE_DEVICES=<free-gpu> \
   UV_PROJECT_ENVIRONMENT=/mnt/ssd1/shreyansh/home_dir/asr_experiments/.venv \
-  uv run inference/vllm_static_fp8/bench_audio_suffix_cudagraph.py \
+  uv run inference/vllm_static_fp8/benchmarks/bench_audio_suffix_cudagraph.py \
     --warmup 3 \
     --repeats 10 \
     --concurrency-iterations 20 \

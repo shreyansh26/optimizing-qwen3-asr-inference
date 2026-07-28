@@ -5,14 +5,19 @@ from __future__ import annotations
 
 import argparse
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 import statistics
+import sys
 import threading
 import time
 from typing import Callable
 
 import torch
 
-from audio_cpu_metadata_pack_patch import run_audio_suffix_eager
+PATCH_DIR = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PATCH_DIR))
+
+from audio_cpu_metadata_pack_patch import run_audio_suffix_eager  # noqa: E402
 from audio_suffix_cudagraph_patch import (
     _MAX_CACHE_ENTRIES,
     _NATURAL_FULL_CHUNK_ROWS,
@@ -24,7 +29,7 @@ from audio_suffix_cudagraph_patch import (
     _make_bucket_key,
     _make_suffix_graph_key,
     ExactShapeAudioSuffixGraphCache,
-)
+)  # noqa: E402
 
 
 _DEFAULT_CASES = tuple(
