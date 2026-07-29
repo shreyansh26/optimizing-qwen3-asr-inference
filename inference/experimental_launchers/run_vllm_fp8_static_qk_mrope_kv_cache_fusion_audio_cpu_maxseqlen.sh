@@ -7,4 +7,4 @@ export ASR_AUDIO_CPU_MAXSEQLEN=1
 
 echo "Qwen3-ASR audio max attention sequence length: cached CPU upper bound 104"
 
-exec "$SCRIPT_DIR/../run_vllm_fp8_static_qk_prefill.sh" "$@"
+exec "$SCRIPT_DIR/../run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh" "$@"
