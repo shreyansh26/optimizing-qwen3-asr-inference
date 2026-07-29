@@ -17,7 +17,7 @@ fi
 export ASR_FP8_STATIC_SCALES_JSON="$(realpath "$SCALES_JSON")"
 DEFAULT_COVERAGE_JSON="/tmp/asr_fp8_static_coverage_${PORT}_{pid}.json"
 export ASR_FP8_STATIC_COVERAGE_JSON="${ASR_FP8_STATIC_COVERAGE_JSON:-$DEFAULT_COVERAGE_JSON}"
-export PYTHONPATH="$SCRIPT_DIR/vllm_static_fp8${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$SCRIPT_DIR/vllm_qwen3_asr_optimizations${PYTHONPATH:+:$PYTHONPATH}"
 
 echo "Model: $MODEL"
 echo "Static FP8 scales: $ASR_FP8_STATIC_SCALES_JSON"
