@@ -8,8 +8,8 @@ PRECISIONS = (
     "bf16",
     "fp8_dynamic",
     "fp8_static",
-    "fp8_static_qk_prefill",
-    "fp8_static_qk_prefill_audio_prefix_suffix_cudagraph",
+    "fp8_static_qk_mrope_kv_cache_fusion",
+    "fp8_static_audio_encoder_cudagraphs",
 )
 FULL_COMPLETED_COUNT = 550
 PARTIAL_AUDIO_LENGTH = 50.0
@@ -61,10 +61,10 @@ def precision_for_row(row: dict[str, str]) -> str | None:
     output_root = row.get("output_root", "").lower()
     if "fp8_dynamic" in output_root:
         return "fp8_dynamic"
-    if "fp8_static_qk_prefill_audio_prefix_suffix_cudagraph" in output_root:
-        return "fp8_static_qk_prefill_audio_prefix_suffix_cudagraph"
-    if "fp8_static_qk_prefill" in output_root:
-        return "fp8_static_qk_prefill"
+    if "fp8_static_audio_encoder_cudagraphs" in output_root:
+        return "fp8_static_audio_encoder_cudagraphs"
+    if "fp8_static_qk_mrope_kv_cache_fusion" in output_root:
+        return "fp8_static_qk_mrope_kv_cache_fusion"
     if "fp8_static" in output_root:
         return "fp8_static"
     if "bf16" in output_root:
@@ -89,7 +89,9 @@ def newest_by_precision(
         if precision is None or not predicate(row):
             continue
         existing = selected.get(precision)
-        if existing is None or row.get("timestamp_utc", "") > existing.get("timestamp_utc", ""):
+        if existing is None or row.get("timestamp_utc", "") > existing.get(
+            "timestamp_utc", ""
+        ):
             selected[precision] = row
     return selected
 
@@ -182,7 +184,12 @@ def print_table(title: str, headers: list[str], rows: list[list[str]]) -> None:
         for index in range(len(headers))
     ]
     print(title)
-    print(" | ".join(header.ljust(widths[index]) for index, header in enumerate(headers)))
+    print(
+        " | ".join(
+            header.ljust(widths[index])
+            for index, header in enumerate(headers)
+        )
+    )
     print("-+-".join("-" * width for width in widths))
     for row in rows:
         print(" | ".join(value.ljust(widths[index]) for index, value in enumerate(row)))
