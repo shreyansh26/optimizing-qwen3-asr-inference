@@ -12,7 +12,7 @@ kernels for Q/K RMSNorm, MRoPE, paged KV-cache writes, CPU-built audio
 metadata, an exact valid-row pack, and guarded audio-encoder CUDA graph caches.
 
 > **Current optimized path:**
-> `PORT=8091 bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh`
+> `bash inference/run_vllm_fp8_static_audio_encoder_cudagraphs.sh`
 >
 > The final natural-only graph policy admits canonical 29--30 second server
 > chunks and leaves arbitrary final tails on the general eager path. In the
@@ -76,8 +76,7 @@ Start one vLLM server in the first terminal. The latency-optimized batched
 static-FP8 launcher is the recommended starting point:
 
 ```bash
-PORT=8091 \
-  bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh
+bash inference/run_vllm_fp8_static_audio_encoder_cudagraphs.sh
 ```
 
 In a second terminal, run the two standard batched benchmarks and print the
@@ -93,7 +92,7 @@ uv run inference/run_benchmark.py \
   --num-files 100 \
   --input-root data/prepared_data \
   --warmup-files 100 \
-  --output-root predictions/results_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph_no_tail/batched_predicted_uniform_audio_length_50s
+  --output-root predictions/results_fp8_static_audio_encoder_cudagraphs/batched_predicted_uniform_audio_length_50s
 
 # Full workload; also computes aggregate CER/WER.
 uv run inference/run_benchmark.py \
@@ -102,20 +101,15 @@ uv run inference/run_benchmark.py \
   --overwrite \
   --input-root data/prepared_data \
   --warmup-files 20 \
-  --output-root predictions/results_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph_no_tail/batched_predicted
+  --output-root predictions/results_fp8_static_audio_encoder_cudagraphs/batched_predicted
 
 uv run inference/analyse_results.py --mode batched
 ```
 
-`run_benchmark.py` currently defaults to the quick-start server at:
-
-```text
-http://localhost:8091/v1
-```
-
-The direct `run_infer.py`/`run_infer_batched.py` clients and most launchers
-default to port 8090. Keep `PORT` and `--base-url` paired when using a different
-launcher or client combination.
+The server port is configurable through `PORT`, and inference clients accept
+the matching endpoint through `--base-url`. Keep these settings paired when
+overriding either default. Examples below use `VLLM_BASE_URL` to represent
+the selected server's `/v1` endpoint.
 
 Choose one server precision:
 
@@ -130,10 +124,10 @@ bash inference/run_vllm_fp8_dynamic.sh
 bash inference/run_vllm_fp8_static.sh
 
 # Static FP8 plus fused Q/K RMSNorm, MRoPE, and KV-cache update.
-bash inference/run_vllm_fp8_static_qk_prefill.sh
+bash inference/run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh
 
-# Current best: CPU metadata plus natural-only prefix and suffix graph caches.
-bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh
+# Current best: fused decoder plus audio-encoder metadata and CUDA graphs.
+bash inference/run_vllm_fp8_static_audio_encoder_cudagraphs.sh
 ```
 
 The inference and benchmark scripts reset vLLM prefix cache before each run.
@@ -180,8 +174,8 @@ predictions/results/batched_predicted_uniform_audio_length_*    # default batche
 predictions/results_bf16/                 # BF16 comparison benchmark outputs
 predictions/results_fp8_dynamic/          # dynamic-FP8 comparison benchmark outputs
 predictions/results_fp8_static/           # static-FP8 comparison/default wrapper outputs
-predictions/results_fp8_static_qk_prefill/ # static-FP8 Q/K fusion benchmark outputs
-predictions/results_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph_no_tail/
+predictions/results_fp8_static_qk_mrope_kv_cache_fusion/ # static-FP8 Q/K fusion benchmark outputs
+predictions/results_fp8_static_audio_encoder_cudagraphs/
                                              # current natural-only graph outputs
 ```
 
@@ -245,7 +239,7 @@ Arguments:
 ```bash
 uv run python inference/run_infer.py <audio_path> \
   --model Qwen/Qwen3-ASR-1.7B \
-  --base-url http://localhost:8090/v1
+  --base-url "$VLLM_BASE_URL"
 ```
 
 Streaming mode:
@@ -312,7 +306,7 @@ Default behavior:
 - Reads `.wav` files under `data/prepared_data`.
 - Writes predictions under `predictions/results/batched_predicted`.
 - Uses model `Qwen/Qwen3-ASR-1.7B`.
-- Uses base URL `http://localhost:8090/v1`.
+- Uses the configured default base URL.
 - Uses `--workers 1`.
 - Uses `--timeout-seconds 10`.
 - Uses `--max-tokens 512`.
@@ -346,7 +340,7 @@ uv run python inference/run_infer_batched.py --num-files 20 --overwrite
 
 # Use a custom server or model.
 uv run python inference/run_infer_batched.py \
-  --base-url http://localhost:8090/v1 \
+  --base-url "$VLLM_BASE_URL" \
   --model Qwen/Qwen3-ASR-1.7B
 
 # Read from and write to custom directories.
@@ -410,7 +404,7 @@ uv run python inference/run_infer_batched.py \
   --input-root data/prepared_data \
   --output-root predictions/results/batched_predicted \
   --model Qwen/Qwen3-ASR-1.7B \
-  --base-url http://localhost:8090/v1 \
+  --base-url "$VLLM_BASE_URL" \
   --workers 4 \
   --num-files 100 \
   --uniform-audio-length 10 \
@@ -448,7 +442,7 @@ Default behavior:
 - `--mode batched` uses `predictions/results/batched_predicted`.
 - For precision comparisons, pass an explicit `--output-root` containing
   `results_bf16`, `results_fp8_dynamic`, `results_fp8_static`, or
-  `results_fp8_static_qk_prefill`. The analysis script uses those path markers
+  `results_fp8_static_qk_mrope_kv_cache_fusion`. The analysis script uses those path markers
   to identify the precision.
 - Streaming is enabled by default; use `--no-stream` for non-streaming requests.
 - `--workers` is only valid with `--mode batched`; default is `1`.
@@ -528,7 +522,7 @@ uv run python inference/run_benchmark.py \
   --input-root data/prepared_data \
   --output-root predictions/results/sequential_predicted_custom \
   --model Qwen/Qwen3-ASR-1.7B \
-  --base-url http://localhost:8090/v1 \
+  --base-url "$VLLM_BASE_URL" \
   --num-files 50
 ```
 
@@ -542,15 +536,15 @@ the next precision:
 | `bf16` | `bash inference/run_vllm.sh` |
 | `fp8_dynamic` | `bash inference/run_vllm_fp8_dynamic.sh` |
 | `fp8_static` | `bash inference/run_vllm_fp8_static.sh` |
-| `fp8_static_qk_prefill` | `bash inference/run_vllm_fp8_static_qk_prefill.sh` |
-| `fp8_static_qk_prefill_audio_prefix_suffix_cudagraph` | `bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh` |
+| `fp8_static_qk_mrope_kv_cache_fusion` | `bash inference/run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh` |
+| `fp8_static_audio_encoder_cudagraphs` | `bash inference/run_vllm_fp8_static_audio_encoder_cudagraphs.sh` |
 
 Use precision-specific output roots. This keeps prediction files isolated and
 allows `analyse_results.py` to infer the precision from the recorded path:
 
 ```bash
 # Set this to the output-root label for the matching running server.
-PRECISION=fp8_static_qk_prefill_audio_prefix_suffix_cudagraph_no_tail
+PRECISION=fp8_static_audio_encoder_cudagraphs
 
 # Full sequential benchmark; --overwrite also enables aggregate CER/WER scoring.
 uv run python inference/run_benchmark.py \
@@ -617,9 +611,9 @@ The final row adds two audio-encoder layers. First, CPU length metadata and a
 single Triton row pack remove synchronization-heavy GPU scalar/list
 materialization; the CPU max-seqlen cache also removes the repeated scalar
 readback in all 24 audio-transformer layers. Second, exact-admitted CUDA graph
-caches replay the 29--30 second convolution/projection/pack prefix and the
-24-layer/projection suffix. Graph-ineligible durations or metadata that still
-satisfy the CPU runtime guard use CPU metadata plus eager prefix/suffix;
+caches replay the 29--30 second audio frontend and 24-layer audio transformer.
+Graph-ineligible durations or metadata that still satisfy the CPU runtime
+guard use CPU metadata plus eager frontend/transformer execution;
 runtime-guard misses delegate to original vLLM. See the
 [audio-length and fast-path guide](docs/qwen3-asr-audio-length-and-graph-fast-path.md)
 for the complete data flow and admission contract.
@@ -735,7 +729,7 @@ Common precision configurations are:
 | BF16 | `bf16_c1` | `bf16_c1_5s` | `inference/run_vllm.sh` |
 | Dynamic FP8 | `fp8dyn_c1` | `fp8dyn_c1_5s` | `inference/run_vllm_fp8_dynamic.sh` |
 | Static FP8 | `fp8static_c1` | `fp8static_c1_5s` | `inference/run_vllm_fp8_static.sh` |
-| Static FP8 + Q/K fusion | `fp8static_qk_kvcache_fuse_c1` | `fp8static_qk_kvcache_fuse_c1_5s` | `inference/run_vllm_fp8_static_qk_prefill.sh` |
+| Static FP8 + Q/K fusion | `fp8static_qk_kvcache_fuse_c1` | `fp8static_qk_kvcache_fuse_c1_5s` | `inference/run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh` |
 
 The wrapper appends the selected mode to both names. For example, the static
 configuration produces:
@@ -831,7 +825,7 @@ inference/results/nsys/<report-name>.sqlite
 
 If the vLLM process remains active after report generation, stop it with
 Ctrl-C in Terminal 1 before starting the next precision or trace mode. Do not
-run two servers on port `8090` at the same time.
+run two servers on the same port at the same time.
 
 See the
 [Nsight Systems FP8 optimization guide](docs/nsys-fp8-optimization-guide.md)
@@ -938,7 +932,7 @@ optimized paths:
   and current benchmark results.
 - [Qwen3-ASR audio lengths and CUDA-graph fast-path coverage](docs/qwen3-asr-audio-length-and-graph-fast-path.md)
   is the authoritative implementation guide for CPU metadata construction,
-  exact Triton row packing, prefix/suffix boundaries, natural-shape admission,
+  exact Triton row packing, frontend/transformer boundaries, natural-shape admission,
   CUDA graph cache behavior, fallback handling, and raw-audio length mapping.
 - [Final natural-only audio CUDA-graph benchmark](docs/audio-natural-only-cudagraph-benchmark.md)
   records the current `analyse_results.py` tables, warm-up policy, comparison
