@@ -11,10 +11,11 @@ Triton kernel. The kernel performs three operations together:
 3. the rotated-K and original-V scatter into vLLM's native BF16 paged KV
    cache.
 
-The name `qk_prefill` is shorthand rather than a strict execution boundary.
-The fused path runs during both decode and prefill. Only its launch
-configuration is prefill-specific: inputs with at least 512 tokens use smaller
-head groups and fewer warps to reduce per-program register pressure.
+The name is intentionally `qk_mrope_kv_cache_fusion`, not `qk_prefill`.
+The fused path runs during both decode and prefill, so naming the whole
+optimization after prefill was inaccurate. Prefill only affects kernel
+dispatch: inputs with at least 512 tokens use smaller head groups and fewer
+warps to reduce per-program register pressure.
 
 The implementation is out of tree. It does not change the installed PyTorch
 2.11.0+cu128 or vLLM 0.24.0 packages.
@@ -48,33 +49,34 @@ flowchart LR
 ## Runtime integration
 
 The dedicated entry point is
-[`inference/run_vllm_fp8_static_qk_prefill.sh`](../inference/run_vllm_fp8_static_qk_prefill.sh).
-It sets `ASR_QK_MROPE_FUSION=1`, resolves the locally cached Qwen3-ASR snapshot
+[`inference/run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh`](../inference/run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh).
+It sets `ASR_QK_MROPE_KV_CACHE_FUSION=1`, resolves the locally cached Qwen3-ASR snapshot
 when available, preserves the served model name `Qwen/Qwen3-ASR-1.7B`, and
 then delegates to the standard static-FP8 launcher.
 
-The standard launcher prepends `inference/vllm_static_fp8` to `PYTHONPATH` and
+The standard launcher prepends `inference/vllm_qwen3_asr_optimizations` to
+`PYTHONPATH` and
 selects `--quantization fp8_static_json`. Python imports
-[`sitecustomize.py`](../inference/vllm_static_fp8/sitecustomize.py) before vLLM
+[`sitecustomize.py`](../inference/vllm_qwen3_asr_optimizations/sitecustomize.py) before vLLM
 parses the quantization name. That imports
-[`vllm_static_fp8_plugin.py`](../inference/vllm_static_fp8/vllm_static_fp8_plugin.py),
-which installs the attention patch only when `ASR_QK_MROPE_FUSION=1`.
+[`vllm_qwen3_asr_optimization_plugin.py`](../inference/vllm_qwen3_asr_optimizations/vllm_qwen3_asr_optimization_plugin.py),
+which installs the attention patch only when `ASR_QK_MROPE_KV_CACHE_FUSION=1`.
 
 The resulting flow is:
 
 ```text
-run_vllm_fp8_static_qk_prefill.sh
-  -> ASR_QK_MROPE_FUSION=1
+run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh
+  -> ASR_QK_MROPE_KV_CACHE_FUSION=1
   -> run_vllm_fp8_static.sh
   -> sitecustomize.py
-  -> vllm_static_fp8_plugin.py
-  -> install_qk_mrope_fusion_patch()
+  -> vllm_qwen3_asr_optimization_plugin.py
+  -> install_qk_mrope_kv_cache_fusion_patch()
   -> patched Qwen3Attention.forward()
   -> torch.ops.vllm.asr_qk_norm_mrope_kv_update
   -> unified_attention_with_output()
 ```
 
-`install_qk_mrope_fusion_patch()` replaces `Qwen3Attention.forward` only once.
+`install_qk_mrope_kv_cache_fusion_patch()` replaces `Qwen3Attention.forward` only once.
 The patched forward retains the model's QKV and output projections but routes
 Q, K, and V through the registered custom op before unified attention.
 
@@ -270,13 +272,13 @@ Choose a free GPU and start the dedicated launcher:
 
 ```bash
 export CUDA_VISIBLE_DEVICES=4
-PORT=8090 bash inference/run_vllm_fp8_static_qk_prefill.sh
+PORT=8090 bash inference/run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh
 ```
 
 The wrapper forwards additional vLLM arguments. For example:
 
 ```bash
-PORT=8090 bash inference/run_vllm_fp8_static_qk_prefill.sh \
+PORT=8090 bash inference/run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh \
   --gpu-memory-utilization 0.5
 ```
 
@@ -285,7 +287,7 @@ Use `bash inference/run_vllm_fp8_static.sh` for the unfused static-FP8 control.
 ## Reproducing the benchmark rows
 
 Run the server and candidate benchmarks on the same free GPU, using a distinct
-output root containing `fp8_static_qk_prefill` so `analyse_results.py` assigns
+output root containing `fp8_static_qk_mrope_kv_cache_fusion` so `analyse_results.py` assigns
 the correct label:
 
 ```bash
@@ -293,7 +295,7 @@ uv run inference/run_benchmark.py \
   --mode batched \
   --workers 16 \
   --overwrite \
-  --output-root predictions/results_fp8_static_qk_prefill/batched_predicted
+  --output-root predictions/results_fp8_static_qk_mrope_kv_cache_fusion/batched_predicted
 
 uv run inference/run_benchmark.py \
   --mode batched \
@@ -302,12 +304,12 @@ uv run inference/run_benchmark.py \
   --num-files 100 \
   --overwrite \
   --output-root \
-    predictions/results_fp8_static_qk_prefill/batched_predicted_uniform_audio_length_50s
+    predictions/results_fp8_static_qk_mrope_kv_cache_fusion/batched_predicted_uniform_audio_length_50s
 
 uv run inference/run_benchmark.py \
   --mode sequential \
   --overwrite \
-  --output-root predictions/results_fp8_static_qk_prefill/sequential_predicted
+  --output-root predictions/results_fp8_static_qk_mrope_kv_cache_fusion/sequential_predicted
 
 uv run inference/run_benchmark.py \
   --mode sequential \
@@ -315,7 +317,7 @@ uv run inference/run_benchmark.py \
   --num-files 100 \
   --overwrite \
   --output-root \
-    predictions/results_fp8_static_qk_prefill/sequential_predicted_uniform_audio_length_50s
+    predictions/results_fp8_static_qk_mrope_kv_cache_fusion/sequential_predicted_uniform_audio_length_50s
 ```
 
 For a stronger comparison, alternate fresh static-control and fused servers
@@ -328,11 +330,11 @@ highest-priority items to confirm.
 
 | Path | Role |
 | --- | --- |
-| `inference/run_vllm_fp8_static_qk_prefill.sh` | Optimized server entry point and cached-model resolution |
+| `inference/run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh` | Optimized server entry point and cached-model resolution |
 | `inference/run_vllm_fp8_static.sh` | Static-FP8 base launcher and control entry point |
-| `inference/vllm_static_fp8/sitecustomize.py` | Early plugin import hook |
-| `inference/vllm_static_fp8/vllm_static_fp8_plugin.py` | Static-FP8 registration and conditional patch install |
-| `inference/vllm_static_fp8/qk_mrope_fusion_patch.py` | Triton kernel, custom op, fallbacks, and attention patch |
+| `inference/vllm_qwen3_asr_optimizations/sitecustomize.py` | Early plugin import hook |
+| `inference/vllm_qwen3_asr_optimizations/vllm_qwen3_asr_optimization_plugin.py` | Static-FP8 registration and conditional patch install |
+| `inference/vllm_qwen3_asr_optimizations/qk_mrope_kv_cache_fusion_patch.py` | Triton kernel, custom op, fallbacks, and attention patch |
 | `inference/run_benchmark.py` | End-to-end benchmark and quality wrapper |
 | `inference/analyse_results.py` | Current CSV comparison tables |
 | `ideas/qk_*.md` | Historical candidate experiments and selection evidence |

@@ -42,10 +42,10 @@ SCALES_JSON=inference/results/fp8_static_scales_128x50.json \
 ```mermaid
 flowchart TD
     A[run_vllm_fp8_static.sh] --> B[Export scale and coverage paths]
-    A --> C[Prepend inference/vllm_static_fp8 to PYTHONPATH]
+    A --> C[Prepend inference/vllm_qwen3_asr_optimizations to PYTHONPATH]
     A --> D[vllm serve --quantization fp8_static_json]
     C --> E[Python automatically imports sitecustomize.py]
-    E --> F[Import vllm_static_fp8_plugin.py]
+    E --> F[Import vllm_qwen3_asr_optimization_plugin.py]
     F --> G[Register fp8_static_json with vLLM]
     D --> H[vLLM resolves StaticJsonFp8Config]
     G --> H
@@ -65,12 +65,12 @@ The static-FP8 extension is the base of the current optimized server:
 
 ```bash
 PORT=8091 \
-  bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh
+  bash inference/run_vllm_fp8_static_audio_encoder_cudagraphs.sh
 ```
 
 The launcher chain enables the fused Q/K RMSNorm + MRoPE + KV-cache patch,
 CPU audio max-seqlen, CPU metadata/Triton row packing, and the natural-only
-audio prefix/suffix CUDA graph caches before delegating to this document's
+audio frontend and transformer CUDA graph caches before delegating to this document's
 `fp8_static_json` launcher. The graph runners are installed together through
 one metadata-aware audio forward; a graph miss executes that optimized eager
 path, while an unsupported metadata/runtime contract returns to the original
@@ -98,7 +98,7 @@ It also exports a diagnostic coverage path and prepends the extension directory
 to `PYTHONPATH`:
 
 ```bash
-export PYTHONPATH="$SCRIPT_DIR/vllm_static_fp8${PYTHONPATH:+:$PYTHONPATH}"
+export PYTHONPATH="$SCRIPT_DIR/vllm_qwen3_asr_optimizations${PYTHONPATH:+:$PYTHONPATH}"
 ```
 
 `uv run` starts vLLM in the project environment, but it does not install this
@@ -108,13 +108,14 @@ extension. The environment and `PYTHONPATH` are the connection.
 
 `sitecustomize` is a special Python module name. During a normal startup,
 Python's `site` initialization attempts to import it from the active import
-path. Because the launcher added `inference/vllm_static_fp8`, Python finds:
+path. Because the launcher added `inference/vllm_qwen3_asr_optimizations`,
+Python finds:
 
 ```text
-inference/vllm_static_fp8/sitecustomize.py
+inference/vllm_qwen3_asr_optimizations/sitecustomize.py
 ```
 
-That file imports `vllm_static_fp8_plugin` only when
+That file imports `vllm_qwen3_asr_optimization_plugin` only when
 `ASR_FP8_STATIC_SCALES_JSON` is set. This keeps the hook inert for unrelated
 Python commands that happen to use the same import path.
 
@@ -307,7 +308,7 @@ ASR_FP8_STATIC_COVERAGE_JSON='inference/results/static_fp8_coverage_{pid}.json' 
 
 Copy these items to a new machine:
 
-- the repository code, including `inference/vllm_static_fp8`;
+- the repository code, including `inference/vllm_qwen3_asr_optimizations`;
 - the calibrated scale JSON;
 - the matching model/checkpoint or model identifier;
 - the pinned project environment.
@@ -331,7 +332,7 @@ environment. After upgrading vLLM, revalidate:
 ### `Unknown quantization method: fp8_static_json`
 
 The plugin was not imported before vLLM parsed its CLI. Check that the launcher
-prepended `inference/vllm_static_fp8` to `PYTHONPATH` and that
+prepended `inference/vllm_qwen3_asr_optimizations` to `PYTHONPATH` and that
 `ASR_FP8_STATIC_SCALES_JSON` is set.
 
 ### `No calibrated static FP8 activation scale for vLLM layer ...`
@@ -356,8 +357,10 @@ the full CER/WER evaluation.
 
 - `inference/run_vllm_fp8_static.sh`: validates inputs, configures the import
   hook, and selects `fp8_static_json`.
-- `inference/vllm_static_fp8/sitecustomize.py`: automatic Python startup hook.
-- `inference/vllm_static_fp8/vllm_static_fp8_plugin.py`: registration, JSON
+- `inference/vllm_qwen3_asr_optimizations/sitecustomize.py`: automatic Python
+  startup hook.
+- `inference/vllm_qwen3_asr_optimizations/vllm_qwen3_asr_optimization_plugin.py`:
+  registration, JSON
   validation, name mapping, layer-method selection, scale injection, and
   coverage reporting.
 - `inference/results/fp8_static_scales_128x50.json`: current calibration input.

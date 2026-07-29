@@ -1,4 +1,4 @@
-# Natural-hotset audio prefix CUDA graphs with a shared pool
+# Natural-hotset audio frontend CUDA graphs with a shared pool
 
 > **Historical development note.** The shared-pool design described here was
 > validated and retained, but the later `M=263..273` tail expansion was not
@@ -31,7 +31,7 @@ contiguous family `M=377..390` uses canonical attention offsets
 `(0,104,208,312,M)`. These counts are workload evidence, not performance
 evidence.
 
-## Exact prefix metadata derivation
+## Exact frontend metadata derivation
 
 The accepted CPU-metadata builder uses 100-frame raw chunks. Three stride-two
 convolutions produce `ceil(raw_chunk_frames / 8)` valid rows per chunk. For one
@@ -43,8 +43,9 @@ valid rows     = 13 * floor(L / 100) + ceil((L % 100) / 8)
 attention cu   = (0, 104, 208, 312, valid_rows)
 ```
 
-The suffix `(M, cu)` histogram does not identify a unique prefix key. Exact
-source enumeration gives 104 full `PrefixGraphKey` values:
+The downstream transformer `(M, cu)` histogram does not identify a unique
+frontend key. Exact source enumeration gives 104 full `FrontendGraphKey`
+values:
 
 | Packed rows | Exact feature lengths | Raw chunks | Padded shape | Valid-row pack |
 |---:|---:|---:|---|---|
@@ -97,7 +98,7 @@ metadata value; it is not an `M`-only cache.
 Each full metadata key has independent probation:
 
 ```text
-observations 1..7 -> identical eager prefix
+observations 1..7 -> identical eager frontend
 observation 8:
   no signature yet -> capture, compare against eager, then admit key+signature
   signature exists -> replay, compare against eager, then admit this full key
@@ -107,7 +108,7 @@ observation 9+ -> stable-input copy, graph replay, independent output clone
 An eighth-call mismatch rejects only that full key. A graph already proven for
 another exact key remains usable. Capture exceptions, unsupported layouts,
 training/grad mode, nested capture, or cache capacity all fail closed to the
-accepted eager prefix.
+accepted eager frontend.
 
 There is no graph or probation eviction. On follow-up branch
 `opt6/audio-tail-rows-263-271`, capacity is 25 graph signatures: 14 natural
@@ -143,7 +144,7 @@ CPU gate:
 ```bash
 rtk env \
   UV_PROJECT_ENVIRONMENT=/mnt/ssd1/shreyansh/home_dir/asr_experiments/.venv \
-  uv run python -m unittest tests.test_audio_prefix_cudagraph_patch -v
+  uv run python -m unittest tests.test_audio_frontend_cudagraph_patch -v
 ```
 
 The focused suite enumerates all 104 natural keys and 14 signatures, rejects
@@ -159,7 +160,7 @@ rtk env \
   CUDA_VISIBLE_DEVICES=1 \
   VLLM_LOGGING_LEVEL=WARNING \
   UV_PROJECT_ENVIRONMENT=/mnt/ssd1/shreyansh/home_dir/asr_experiments/.venv \
-  uv run inference/vllm_static_fp8/benchmarks/bench_audio_prefix_cudagraph.py \
+  uv run inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_frontend_cudagraph.py \
     --warmup 3 \
     --repeats 10 \
     --replay-checks 3 \
@@ -176,14 +177,14 @@ admitted `M=387` key from two host threads on two CUDA streams.
 Required final marker:
 
 ```text
-gate=PASS_EXACT_NATURAL_AUDIO_PREFIX_CUDAGRAPH
+gate=PASS_EXACT_NATURAL_AUDIO_FRONTEND_CUDAGRAPH
 ```
 
 ### Follow-up 21-chunk tail-row gate
 
 Branch `opt6/audio-tail-rows-263-271` adds the missing compatible rows 263,
 266, 269, and 271 without changing the prefix input topology
-`(21,1,128,100)`. On 2026-07-21, GPU1 passed the chained prefix-plus-suffix
+`(21,1,128,100)`. On 2026-07-21, GPU1 passed the chained audio-encoder
 helper independently for all four new rows. Each run passed bitwise equality,
 observation-eight admission, changed-content replay, and two-thread/two-stream
 concurrency. Copy + graph replay + clone CUDA time was 2133.536--2137.824 us,

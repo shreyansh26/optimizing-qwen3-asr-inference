@@ -20,7 +20,7 @@ the paged BF16 KV cache without another launch or another read of K.
 
 ## Implementation
 
-The experiment extends `qk_mrope_fusion_patch.py` with a vLLM custom op that:
+The experiment extends `qk_mrope_kv_cache_fusion_patch.py` with a vLLM custom op that:
 
 1. obtains the layer's KV cache and slot mapping through vLLM's forward
    context;

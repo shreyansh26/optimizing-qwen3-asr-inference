@@ -3,7 +3,7 @@
 This note explains how decoded audio duration becomes a Qwen3-ASR feature
 length, how that feature length becomes the post-CNN row count used by the
 audio transformer, and which resulting shapes are admitted by the current
-audio-prefix and audio-suffix CUDA graphs.
+audio-frontend and audio-transformer CUDA graphs.
 
 The implementation described here is the final path on branch
 `promote/audio-prefix-shared-suffix-bucketed`. Earlier branches first added a
@@ -15,8 +15,8 @@ canonical 29--30 second chunk family. It combines:
 - the accepted static-FP8 decoder with fused Q/K RMSNorm, MRoPE, and KV-cache
   write;
 - general CPU construction of audio length and packing metadata;
-- exact-admitted audio-prefix CUDA graphs with a shared graph memory pool;
-- exact-admitted audio-suffix CUDA graphs grouped into one padded 390-row bucket.
+- exact-admitted audio-frontend CUDA graphs with a shared graph memory pool;
+- exact-admitted audio-transformer CUDA graphs grouped into one padded 390-row bucket.
 
 The key distinction is:
 
@@ -24,6 +24,18 @@ The key distinction is:
 > waveform. It recognizes exact tensor shapes and metadata after decoding and
 > resampling. An unseen audio file can use the graph fast path when it maps to
 > an admitted shape.
+
+This documentation uses stage names rather than the earlier positional names:
+
+- **audio frontend**: the three CNNs, `conv_out`, positional embedding, and
+  valid-row pack, producing `[M, 1024]`;
+- **audio transformer**: the 24 transformer layers, `ln_post`, and output
+  projections, producing `[M, 2048]`;
+- **audio encoder CUDA graphs**: the frontend and transformer caches together.
+
+The retired “prefix” and “suffix” terms only meant “before” and “after” the
+packed `[M, 1024]` boundary. They did not describe audio time, prompt
+placement, or vLLM's text prefix cache.
 
 ## End-to-end length pipeline
 
@@ -50,15 +62,15 @@ The launcher enables all four audio flags before chaining into the fused
 static-FP8 server:
 
 ```text
-run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh
+run_vllm_fp8_static_audio_encoder_cudagraphs.sh
   -> ASR_AUDIO_CPU_MAXSEQLEN=1
   -> ASR_AUDIO_CPU_METADATA_PACK=1
-  -> ASR_AUDIO_PREFIX_CUDAGRAPH=1
-  -> ASR_AUDIO_SUFFIX_CUDAGRAPH=1
-  -> run_vllm_fp8_static_qk_prefill.sh
+  -> ASR_AUDIO_FRONTEND_CUDAGRAPH=1
+  -> ASR_AUDIO_TRANSFORMER_CUDAGRAPH=1
+  -> run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh
 ```
 
-`audio_prefix_suffix_cudagraph_patch.py` installs both graph runners through a
+`audio_encoder_cudagraph_patch.py` installs both graph runners through a
 single patched audio-encoder forward owned by
 `audio_cpu_metadata_pack_patch.py`. For each encoder invocation:
 
@@ -67,12 +79,12 @@ CPU feature_lens and aftercnn_lens
   -> validate installed model, backend, tensors, and exact length formula
   -> derive chunk_lengths, pack lengths/offsets, and cu_seqlens on CPU
   -> split and pad GPU input features using CPU-known chunk lengths
-  -> prefix runner
-       admitted hot natural key -> prefix CUDA graph
+  -> audio frontend runner
+       admitted hot natural key -> frontend CUDA graph
        otherwise                -> eager CNN/projection + Triton row pack
   -> async copy cu_seqlens to GPU; obtain CPU-cached max_seqlen
-  -> suffix runner
-       admitted hot natural key -> padded 390-row suffix CUDA graph
+  -> audio transformer runner
+       admitted hot natural key -> padded 390-row transformer CUDA graph
        otherwise                -> eager 24-layer transformer/projection
 ```
 
@@ -187,7 +199,7 @@ The installed vLLM formula is `_get_feat_extract_output_lengths()` in:
 ```
 
 Our exact CPU mirror is
-[`_expected_audio_output_lengths()`](../inference/vllm_static_fp8/audio_cpu_metadata_pack_patch.py).
+[`_expected_audio_output_lengths()`](../inference/vllm_qwen3_asr_optimizations/audio_cpu_metadata_pack_patch.py).
 
 ### Worked examples
 
@@ -240,8 +252,8 @@ M=390 -> lengths 104 + 104 + 104 + 78
 ```
 
 FlashAttention treats each interval as a separate local-attention sequence.
-Our metadata patch reconstructs these boundaries on the CPU in
-[`_build_cpu_metadata()`](../inference/vllm_static_fp8/audio_cpu_metadata_pack_patch.py),
+Our CPU sequence-metadata path reconstructs these boundaries on the CPU in
+[`_build_cpu_metadata()`](../inference/vllm_qwen3_asr_optimizations/audio_cpu_metadata_pack_patch.py),
 avoiding the previous GPU-to-CPU length readback while preserving the model's
 existing algorithm.
 
@@ -249,12 +261,12 @@ existing algorithm.
 
 There are three distinct optimization scopes.
 
-### CPU metadata and valid-row packing
+### CPU sequence metadata construction and Triton valid-row packing
 
-The CPU metadata path derives raw chunk lengths, per-chunk post-CNN lengths,
-packing offsets, and attention boundaries for arbitrary positive feature
-lengths accepted by the guarded installed model implementation. This part is
-not restricted to 20-second, 29-second, or 30-second audio.
+The CPU sequence-metadata path derives raw chunk lengths, per-chunk post-CNN
+lengths, packing offsets, and attention boundaries for arbitrary positive
+feature lengths accepted by the guarded installed model implementation. This
+part is not restricted to 20-second, 29-second, or 30-second audio.
 
 The Triton valid-row pack copies only the valid CNN rows into their calculated
 output offsets. Its CPU metadata tensor contains two halves: the valid row
@@ -262,13 +274,119 @@ count for each padded CNN chunk and that chunk's destination offset. One Triton
 program is launched per padded row and masks invalid rows, eliminating the
 prior boolean-index construction and GPU-to-host list materialization.
 
-The patch also retains `audio_feature_lengths` on the CPU through vLLM's
-multimodal field configuration. It validates both `feature_lens` and
-`aftercnn_lens`, constructs `chunk_lengths`, `pack_metadata`, and
-`cu_seqlens`, and transfers only the small metadata needed by GPU kernels.
-`audio_cpu_maxseqlen_patch.py` returns the already-known CPU maximum attention
-length, avoiding the same CUDA scalar readback in each of the 24 layers.
-The cached value `104` is a safe upper bound; a very short request may have a
+#### Why there are two CPU audio patches
+
+The max-seqlen and sequence-metadata patches remove different synchronization
+points at different seams:
+
+| | CPU max-seqlen cache | CPU sequence metadata and row pack |
+|---|---|---|
+| Implementation | [`audio_cpu_maxseqlen_patch.py`](../inference/vllm_qwen3_asr_optimizations/audio_cpu_maxseqlen_patch.py) | [`audio_cpu_metadata_pack_patch.py`](../inference/vllm_qwen3_asr_optimizations/audio_cpu_metadata_pack_patch.py) |
+| Patched seam | `compute_attn_mask_seqlen()` | Audio encoder `forward()` and multimodal field configuration |
+| Produces | One CPU `int32` scalar with the guarded upper bound `104` | `chunk_lengths`, `pack_metadata`, `cu_seqlens`, and packed feature rows |
+| Avoids | Repeated CUDA scalar readbacks in the 24 transformer layers | GPU/CPU length materialization, dynamic boolean indexing, and metadata synchronizations |
+| Triton kernel | No | Yes, to compact valid post-CNN rows |
+| Standalone | Can be enabled independently | Requires and installs the max-seqlen patch |
+
+The max-seqlen patch is deliberately narrow. For the exact guarded encoder
+geometry, it replaces `compute_attn_mask_seqlen(cu_seqlens)` with a cached
+CPU tensor containing `104`. Downstream FlashAttention layers can therefore
+read the upper bound without synchronizing on a CUDA scalar. It does not build
+`cu_seqlens`, split audio, run convolutions, or move feature rows.
+
+The sequence-metadata patch replaces the broader encoder input pipeline. It
+keeps `audio_feature_lengths` on the CPU, constructs all chunking, packing, and
+attention metadata there, runs the audio frontend, compacts valid rows
+with Triton, transfers the small `cu_seqlens` tensor asynchronously, and then
+runs the audio transformer. After constructing `cu_seqlens`, it still needs
+a `max_seqlen` value for FlashAttention, which is why it depends on the
+max-seqlen cache:
+
+```text
+CPU sequence-metadata patch
+  -> build chunk_lengths, pack_metadata, and cu_seqlens
+  -> Triton valid-row pack
+  -> copy cu_seqlens to CUDA
+  -> CPU max-seqlen cache returns 104
+  -> run 24 audio-transformer layers
+```
+
+This dependency is enforced at installation. The broader patch requires both
+`ASR_AUDIO_CPU_METADATA_PACK=1` and `ASR_AUDIO_CPU_MAXSEQLEN=1`, and it installs
+the max-seqlen method replacement before replacing the encoder forward.
+
+These are related but distinct pieces of state:
+
+- `chunk_lengths` describes how the input feature frames are divided into raw
+  convolution chunks.
+- `pack_metadata` contains the valid post-CNN row count and destination offset
+  for each padded chunk. The Triton kernel consumes this metadata to compact
+  rows.
+- `cu_seqlens` contains cumulative boundaries for FlashAttention. It partitions
+  the already-packed rows into local-attention sequences; it is not a packed
+  list of row lengths.
+- The CPU max-seqlen cache supplies the largest interval between consecutive
+  `cu_seqlens` values. For this encoder, `104` is the guarded safe upper bound.
+
+For a canonical 30-second chunk, `F=3000` feature frames become 30 full
+100-frame convolution chunks. Every chunk produces 13 valid post-CNN rows, so
+the packed row count is `M=390`:
+
+```text
+chunk_lengths       = [100, 100, ..., 100]       # 30 entries
+valid row counts    = [13, 13, ..., 13]          # 30 entries
+destination offsets = [0, 13, 26, ..., 377]
+packed output shape = [390, 1024]
+
+cu_seqlens           = [0, 104, 208, 312, 390]
+attention lengths    = [104, 104, 104, 78]
+cached max_seqlen    = 104
+```
+
+The Triton pack uses the valid counts and destination offsets to create the
+`[390, 1024]` tensor. FlashAttention then uses `cu_seqlens` to interpret that
+same tensor as four independent local-attention sequences. No kernel “packs
+sequence lengths”; the only packed objects are the valid post-CNN feature
+rows.
+
+Here, “valid” means that an output row corresponds to real feature frames
+rather than right-padding added so chunks can be processed as one rectangular
+tensor. It does not mean that the row contains speech or nonzero values.
+For example, suppose one audio produces two raw chunks containing 100 and 30
+feature frames. The shorter chunk is padded to 100 frames before the batched
+convolutions:
+
+```text
+true input lengths             = [100, 30]
+padded CNN input shape         = [2 chunks, 100 frames]
+CNN output shape               = [2 chunks, 13 rows, 1024]
+valid post-CNN rows per chunk  = [13, 4]
+packing destination offsets    = [0, 13]
+```
+
+Three stride-two convolutions map the full chunk to 13 rows and the real
+30-frame tail to `ceil(30 / 8) = 4` rows. The remaining nine rows in the
+tail chunk exist only because that chunk was padded to 100 input frames. The
+pack therefore copies all 13 rows from the first chunk followed by the first
+four rows from the tail:
+
+```text
+packed output shape = [(13 + 4), 1024] = [17, 1024]
+```
+
+The CPU calculates `[13, 4]` and `[0, 13]` before the CNN runs because the
+three convolutions' output-length formula is known. The Triton kernel applies
+that metadata after the CNN, preserving the original chunk-major row order
+while skipping only padding-derived rows.
+
+The CPU sequence-metadata patch also retains `audio_feature_lengths` on the
+CPU through vLLM's multimodal field configuration. It validates both
+`feature_lens` and `aftercnn_lens`, constructs `chunk_lengths`,
+`pack_metadata`, and `cu_seqlens`, and transfers only the small metadata needed
+by GPU kernels. The CPU max-seqlen cache in
+`audio_cpu_maxseqlen_patch.py` returns the already-known maximum attention
+length, avoiding the same CUDA scalar readback in each of the 24 layers. The
+cached value `104` is a safe upper bound; a very short request may have a
 smaller actual attention partition.
 
 Installation fails closed unless the installed distribution is vLLM
@@ -281,12 +399,12 @@ original vLLM forward.
 
 Implementation:
 
-- [`audio_cpu_metadata_pack_patch.py`](../inference/vllm_static_fp8/audio_cpu_metadata_pack_patch.py)
-- [`audio_cpu_maxseqlen_patch.py`](../inference/vllm_static_fp8/audio_cpu_maxseqlen_patch.py)
+- [`audio_cpu_metadata_pack_patch.py`](../inference/vllm_qwen3_asr_optimizations/audio_cpu_metadata_pack_patch.py)
+- [`audio_cpu_maxseqlen_patch.py`](../inference/vllm_qwen3_asr_optimizations/audio_cpu_maxseqlen_patch.py)
 
-### Prefix CUDA graphs
+### Audio frontend CUDA graphs
 
-The prefix graph covers convolution, projection, positional embedding, and
+The frontend graph covers convolution, projection, positional embedding, and
 valid-row packing. It validates the complete runtime key before replay:
 
 - padded shape and stride;
@@ -307,12 +425,12 @@ is otherwise compatible.
 
 Implementation:
 
-- [`audio_prefix_cudagraph_patch.py`](../inference/vllm_static_fp8/audio_prefix_cudagraph_patch.py)
-- [Detailed prefix design](audio-prefix-cudagraph.md)
+- [`audio_frontend_cudagraph_patch.py`](../inference/vllm_qwen3_asr_optimizations/audio_frontend_cudagraph_patch.py)
+- [Detailed frontend design](audio-frontend-cudagraph.md)
 
-### Suffix CUDA graphs
+### Audio transformer CUDA graphs
 
-The suffix graph covers the 24 audio-transformer layers and output projection.
+The transformer graph covers the 24 audio-transformer layers and output projection.
 Exact runtime keys are admitted into one padded graph family:
 
 ```text
@@ -320,14 +438,14 @@ natural rows M in {377, ..., 390}
   -> padded graph bucket of 390 rows
 ```
 
-Padding reduces 14 exact suffix shapes to one captured graph, while exact
+Padding reduces 14 exact transformer shapes to one captured graph, while exact
 pre-admission prevents an unsupported shape or attention layout from replaying
 through a merely equal-sized bucket.
 
 Implementation:
 
-- [`audio_suffix_cudagraph_patch.py`](../inference/vllm_static_fp8/audio_suffix_cudagraph_patch.py)
-- [Detailed suffix design](../ideas/audio_suffix_cudagraph.md)
+- [`audio_transformer_cudagraph_patch.py`](../inference/vllm_qwen3_asr_optimizations/audio_transformer_cudagraph_patch.py)
+- [Detailed transformer design](../ideas/audio_transformer_cudagraph.md)
 
 ## Exact natural graph coverage
 
@@ -380,19 +498,20 @@ single-audio feature range continuous across these rows:
 | 273 | 2097..2100 | `(20.96, 21.00]` s |
 
 That experimental family covered `F=2017..2100`, or `(20.16, 21.00]` seconds,
-without changing the 273-row suffix bucket. The
+without changing the 273-row transformer bucket. The
 promoted natural-only implementation sets the tail admission sets to empty,
 so every row in this table now takes the general eager path. The mapping is
 retained here to explain the experiment and the fixed-50 benchmark stress case.
 
 ### Historical `opt6` GPU validation
 
-On 2026-07-21, GPU1 passed the SM90 suffix helper for all 25 exact keys: the
+On 2026-07-21, GPU1 passed the SM90 transformer helper for all 25 exact keys:
+the
 11 tail rows `M=263..273` and 14 natural rows `M=377..390`. Every key was
 bitwise exact, bucket-eager and replay kernel order matched at 268 kernels,
 and alternating plus two-thread/two-stream shared-bucket gates passed.
 
-The chained prefix-plus-suffix helper then passed each newly admitted row with
+The chained audio-encoder helper then passed each newly admitted row with
 eight-observation probation, changed-content equality, and two-thread/two-
 stream concurrency:
 
@@ -407,7 +526,7 @@ These focused helper measurements were followed by a clean end-to-end service
 run from commit `98f6992` on GPU1. The 500-file, 50-second batched workload
 completed with zero failures/timeouts at 29.572 files/s, 0.526 s mean latency,
 and 0.199 s mean TTFT. The server log also showed the expanded 21-chunk family
-entering probation and replay through the existing 273-row suffix bucket.
+entering probation and replay through the existing 273-row transformer bucket.
 
 ## Long-file splitting and arbitrary final tails
 
@@ -492,10 +611,10 @@ This result demonstrates useful partial coverage, not uniform acceleration of
 every file:
 
 - non-final 29--30 second chunks from long recordings frequently enter the
-  natural prefix and suffix graphs;
+  natural frontend and transformer graphs;
 - eligible final chunks also enter a graph;
 - unsupported final tails retain the general CPU metadata path and use eager
-  prefix/suffix execution;
+  frontend/transformer execution;
 - graph-eligible invocations occur often enough to improve aggregate batched
   throughput and mean latency;
 - TTFT p50/p95 regress in this comparison and remain the main measured
@@ -532,10 +651,10 @@ HTTP concurrency does not weaken graph validation. An unseen single audio with
 an admitted length and canonical metadata can use both graphs regardless of
 its content.
 
-Prefix admission explicitly requires one audio and checks `feature_lens`,
+Frontend admission explicitly requires one audio and checks `feature_lens`,
 `aftercnn_lens`, raw chunking, pack offsets, and `cu_seqlens`; a multi-audio
-prefix therefore stays eager even when its total rows equal an admitted `M`.
-The suffix sees only the boundary tensor and attention metadata. It may qualify
+frontend therefore stays eager even when its total rows equal an admitted `M`.
+The transformer sees only the boundary tensor and attention metadata. It may qualify
 if those values exactly equal `[M,1024]` plus canonical
 `(0,104,208,312,M)`, but equal total rows with a different partition remain a
 miss. In either case, a miss retains eager correctness.

@@ -91,7 +91,7 @@ Service launcher:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 PORT=8091 \
-  inference/experimental_launchers/run_vllm_fp8_static_qk_prefill_audio_cpu_metadata_pack.sh
+  inference/experimental_launchers/run_vllm_fp8_static_qk_mrope_kv_cache_fusion_audio_cpu_metadata_pack.sh
 ```
 
 ### CUDA helper
@@ -171,7 +171,7 @@ latency-prioritized batched track.
 
 This note's benchmark rows are the historical round-three evidence for that
 layer, not the final endpoint. The promoted server now injects the natural-only
-prefix and suffix CUDA graph runners into this same metadata-aware forward.
+frontend and transformer CUDA graph runners into this same metadata-aware forward.
 Graph misses continue through this CPU-metadata/Triton eager path; only a
 metadata compatibility/runtime-guard miss returns to the original vLLM
 forward. Current composed results are in

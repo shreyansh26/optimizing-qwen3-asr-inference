@@ -22,14 +22,14 @@ corresponding exactness helper also passes.
 | `inference/analyse_results.py` | Aggregate recorded service rows | No | No | Comparison tables |
 | `bench_audio_cpu_maxseqlen.py` | CPU max-seqlen substitution | No | No | Attention correctness and avoided scalar-readback cost |
 | `bench_audio_cpu_metadata_pack.py` | CPU metadata and Triton valid-row pack | No | No | Bitwise packing, synchronization events, timing |
-| `bench_audio_prefix_cudagraph.py` | Audio prefix CUDA graph cache | No | No | Exactness, kernel order, timing, ownership, concurrency |
-| `bench_audio_suffix_cudagraph.py` | Audio suffix CUDA graph cache | No | No | Exactness, kernel order, timing, bucket reuse, concurrency |
-| `bench_audio_prefix_suffix_cudagraph.py` | Chained prefix and suffix caches | No | No | End-to-end encoder graph exactness and timing |
+| `bench_audio_frontend_cudagraph.py` | Audio frontend CUDA graph cache | No | No | Exactness, kernel order, timing, ownership, concurrency |
+| `bench_audio_transformer_cudagraph.py` | Audio transformer CUDA graph cache | No | No | Exactness, kernel order, timing, bucket reuse, concurrency |
+| `bench_audio_encoder_cudagraphs.py` | Chained frontend and transformer caches | No | No | End-to-end encoder graph exactness and timing |
 | `start_vllm_server_with_nsys.sh` | Launch server under Nsight | Starts it | Indirectly | `.nsys-rep` and SQLite trace |
 | `run_nsys_profile.sh` | Warm up and trigger Nsight capture | Yes | Yes | One bounded profiled request |
 
 The five `bench_audio_*.py` helpers live under
-`inference/vllm_static_fp8/benchmarks/`.
+`inference/vllm_qwen3_asr_optimizations/benchmarks/`.
 
 ## Common setup
 
@@ -51,8 +51,8 @@ The graph helpers set their internal device to `cuda:0`. With
 `CUDA_VISIBLE_DEVICES=<free-gpu>`, that is the selected physical GPU. Do not
 run a vLLM server or another memory-intensive process on the same GPU.
 
-The prefix, suffix, and combined graph gates require SM90, normally an NVIDIA
-H100. The suffix and combined helpers also initialize a one-process NCCL group,
+The frontend, transformer, and combined graph gates require SM90, normally an
+NVIDIA H100. The transformer and combined helpers also initialize a one-process NCCL group,
 so their `--master-port` must be unused.
 
 ## End-to-end service benchmark
@@ -72,7 +72,7 @@ inference/results/batched.csv
 Start exactly one server configuration first. The final optimized server is:
 
 ```bash
-bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh
+bash inference/run_vllm_fp8_static_audio_encoder_cudagraphs.sh
 ```
 
 Keep the server `PORT` and benchmark `--base-url` consistent. Both currently
@@ -122,7 +122,7 @@ uv run inference/run_benchmark.py \
   --mode batched \
   --workers 16 \
   --overwrite \
-  --output-root predictions/results_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph/batched_predicted
+  --output-root predictions/results_fp8_static_audio_encoder_cudagraphs/batched_predicted
 ```
 
 CER/WER runs only when all three conditions hold:
@@ -175,8 +175,8 @@ Recognized output-root tokens are:
 bf16
 fp8_dynamic
 fp8_static
-fp8_static_qk_prefill
-fp8_static_qk_prefill_audio_prefix_suffix_cudagraph
+fp8_static_qk_mrope_kv_cache_fusion
+fp8_static_audio_encoder_cudagraphs
 ```
 
 ## CUDA correctness and microbenchmark helpers
@@ -195,7 +195,7 @@ eager_time / candidate_time - 1 > 0
 
 ### CPU max-seqlen helper
 
-File: `inference/vllm_static_fp8/benchmarks/bench_audio_cpu_maxseqlen.py`
+File: `inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_cpu_maxseqlen.py`
 
 This checks that using the safe CPU upper bound `104` produces FlashAttention
 outputs within tolerance of the dynamically computed GPU maximum. It then
@@ -204,7 +204,7 @@ across the 24 audio-transformer layers.
 
 ```bash
 CUDA_VISIBLE_DEVICES=<free-gpu> \
-uv run inference/vllm_static_fp8/benchmarks/bench_audio_cpu_maxseqlen.py \
+uv run inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_cpu_maxseqlen.py \
   --repeats 200 \
   --layers 24 \
   --heads 16 \
@@ -224,7 +224,7 @@ This helper uses tolerance-based attention comparison, not bitwise equality.
 
 ### CPU metadata and valid-row-pack helper
 
-File: `inference/vllm_static_fp8/benchmarks/bench_audio_cpu_metadata_pack.py`
+File: `inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_cpu_metadata_pack.py`
 
 This compares the original GPU-length, boolean-index reference with the
 CPU-built metadata and Triton valid-row pack. It requires bitwise output
@@ -233,7 +233,7 @@ time for both paths.
 
 ```bash
 CUDA_VISIBLE_DEVICES=<free-gpu> \
-uv run inference/vllm_static_fp8/benchmarks/bench_audio_cpu_metadata_pack.py \
+uv run inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_cpu_metadata_pack.py \
   --chunks 448 \
   --rows 13 \
   --hidden-size 1024 \
@@ -250,11 +250,11 @@ Compare `reference_profiler_sync_events` with
 `candidate_profiler_sync_events`. The candidate is intended to remove the
 GPU-to-host synchronization events in the reference metadata construction.
 
-### Prefix CUDA graph helper
+### Audio frontend CUDA graph helper
 
-File: `inference/vllm_static_fp8/benchmarks/bench_audio_prefix_cudagraph.py`
+File: `inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_frontend_cudagraph.py`
 
-The prefix is:
+The audio frontend is:
 
 ```text
 chunked/padded log-mel features
@@ -274,7 +274,7 @@ memory consumption.
 ```bash
 CUDA_VISIBLE_DEVICES=<free-h100> \
 VLLM_LOGGING_LEVEL=WARNING \
-uv run inference/vllm_static_fp8/benchmarks/bench_audio_prefix_cudagraph.py \
+uv run inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_frontend_cudagraph.py \
   --warmup 3 \
   --repeats 10 \
   --replay-checks 3 \
@@ -284,7 +284,7 @@ uv run inference/vllm_static_fp8/benchmarks/bench_audio_prefix_cudagraph.py \
 For a targeted row, repeat `--rows` as needed:
 
 ```bash
-uv run inference/vllm_static_fp8/benchmarks/bench_audio_prefix_cudagraph.py \
+uv run inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_frontend_cudagraph.py \
   --rows 377 \
   --rows 390 \
   --warmup 3 \
@@ -296,14 +296,14 @@ uv run inference/vllm_static_fp8/benchmarks/bench_audio_prefix_cudagraph.py \
 Final acceptance marker:
 
 ```text
-gate=PASS_EXACT_NATURAL_AUDIO_PREFIX_CUDAGRAPH
+gate=PASS_EXACT_NATURAL_AUDIO_FRONTEND_CUDAGRAPH
 ```
 
-### Suffix CUDA graph helper
+### Audio transformer CUDA graph helper
 
-File: `inference/vllm_static_fp8/benchmarks/bench_audio_suffix_cudagraph.py`
+File: `inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_transformer_cudagraph.py`
 
-The suffix is:
+The audio transformer is:
 
 ```text
 hidden states [M, 1024]
@@ -321,7 +321,7 @@ outputs, alternating cross-key reuse, and two-thread/two-stream replay.
 ```bash
 CUDA_VISIBLE_DEVICES=<free-h100> \
 VLLM_LOGGING_LEVEL=WARNING \
-uv run inference/vllm_static_fp8/benchmarks/bench_audio_suffix_cudagraph.py \
+uv run inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_transformer_cudagraph.py \
   --warmup 3 \
   --repeats 10 \
   --concurrency-iterations 20 \
@@ -332,7 +332,7 @@ A targeted run still needs at least two distinct keys because the alternating
 and concurrency gates require two requests sharing one bucket:
 
 ```bash
-uv run inference/vllm_static_fp8/benchmarks/bench_audio_suffix_cudagraph.py \
+uv run inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_transformer_cudagraph.py \
   --segments 104,104,104,65 \
   --segments 104,104,104,78 \
   --warmup 3 \
@@ -344,17 +344,17 @@ uv run inference/vllm_static_fp8/benchmarks/bench_audio_suffix_cudagraph.py \
 Those cases are `M=377` and `M=390`. Final acceptance marker:
 
 ```text
-gate=PASS_BUCKETED_AUDIO_SUFFIX_CUDAGRAPH
+gate=PASS_BUCKETED_AUDIO_TRANSFORMER_CUDAGRAPH
 ```
 
-### Combined prefix-plus-suffix helper
+### Combined audio-encoder helper
 
-File: `inference/vllm_static_fp8/benchmarks/bench_audio_prefix_suffix_cudagraph.py`
+File: `inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_encoder_cudagraphs.py`
 
 This runs the two graph caches as one audio-encoder chain. It verifies that
 calls 1–7 remain eager, call 8 admits both caches, changed input content remains
 bitwise exact, and concurrent chained replay is safe. It then compares complete
-eager prefix-plus-suffix execution with input copy, both graph replays, and
+eager audio-encoder execution with input copy, both graph replays, and
 output cloning.
 
 The default representative is `M=384`; `--rows` accepts one value from
@@ -363,7 +363,7 @@ The default representative is `M=384`; `--rows` accepts one value from
 ```bash
 CUDA_VISIBLE_DEVICES=<free-h100> \
 VLLM_LOGGING_LEVEL=WARNING \
-uv run inference/vllm_static_fp8/benchmarks/bench_audio_prefix_suffix_cudagraph.py \
+uv run inference/vllm_qwen3_asr_optimizations/benchmarks/bench_audio_encoder_cudagraphs.py \
   --rows 384 \
   --warmup 3 \
   --repeats 10 \
@@ -377,7 +377,7 @@ Final acceptance marker:
 correctness=bitwise_exact
 probation=PASS observations=8
 concurrency=PASS threads=2 streams=2
-gate=PASS_EXACT_AUDIO_PREFIX_SUFFIX_CUDAGRAPH
+gate=PASS_EXACT_AUDIO_ENCODER_CUDAGRAPHS
 ```
 
 ## Nsight Systems workflow
@@ -391,7 +391,7 @@ Edit these variables in `inference/start_vllm_server_with_nsys.sh`:
 ```bash
 SESSION_NAME=fp8static_qk_kvcache_fuse_c1
 REPORT_NAME=fp8static_qk_kvcache_fuse_c1_5s
-VLLM_SCRIPT=inference/run_vllm_fp8_static_qk_prefill.sh
+VLLM_SCRIPT=inference/run_vllm_fp8_static_qk_mrope_kv_cache_fusion.sh
 ```
 
 Choose one trace mode:
@@ -438,7 +438,7 @@ For a change spanning the final audio stack:
 1. Run the focused unit tests for the changed patch.
 2. Run the CPU max-seqlen helper if attention metadata changed.
 3. Run the CPU metadata-pack helper if chunking or valid-row packing changed.
-4. Run the prefix or suffix helper for the modified graph cache.
+4. Run the frontend or transformer helper for the modified graph cache.
 5. Run the combined helper when either graph's interface or concurrency changes.
 6. Run the four-command end-to-end matrix and inspect both analyzer tables.
 7. Capture Nsight only when kernel order or unexplained latency needs tracing.

@@ -11,7 +11,7 @@ The promoted server composes four optimizations:
 1. calibrated static FP8 decoder execution;
 2. fused Q/K RMSNorm, MRoPE, and paged KV-cache writes;
 3. CPU-built audio length/attention metadata plus a Triton valid-row pack;
-4. exact-admitted CUDA graph caches for the audio-encoder prefix and suffix.
+4. exact-admitted CUDA graph caches for the audio frontend and transformer.
 
 The CUDA graph policy is deliberately **natural-only**. It captures canonical
 29--30 second chunks created by the server splitter and does not capture the
@@ -22,7 +22,7 @@ Launch the final stack with:
 
 ```bash
 PORT=8091 \
-  bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh
+  bash inference/run_vllm_fp8_static_audio_encoder_cudagraphs.sh
 ```
 
 For the exact audio-length mapping and implementation flow, see
@@ -30,24 +30,24 @@ For the exact audio-length mapping and implementation flow, see
 
 ## What is cached
 
-“Prefix” and “suffix” are computation regions, not time segments of the audio:
+The graph boundary follows two named audio-encoder stages:
 
 ```text
 input features
   -> chunk/pad -> three CNNs -> conv_out -> position add -> valid-row pack
-     <----------------------- prefix graph ------------------------------>
+     <----------------------- frontend graph ------------------------------>
   -> 24 audio-transformer layers -> ln_post -> proj1 -> act -> proj2
-     <----------------------- suffix graph ------------------------------>
+     <----------------------- transformer graph ------------------------------>
 ```
 
 The tensor at the boundary is `[M, 1024]`, so the same admitted post-CNN row
 range `M=377..390` appears in both caches.
 
-- The prefix accepts 104 exact feature lengths `F=2897..3000`. They collapse
+- The audio frontend accepts 104 exact feature lengths `F=2897..3000`. They collapse
   to 14 captured signatures, one for each output row count `M=377..390`.
-- All prefix signatures use one CUDA graph memory pool. Capture/replay is
+- All frontend signatures use one CUDA graph memory pool. Capture/replay is
   serialized because pool-backed allocations may alias across signatures.
-- The suffix accepts the same 14 exact row counts but pads them into one fixed
+- The audio transformer accepts the same 14 exact row counts but pads them into one fixed
   390-row graph. The returned tensor is sliced back to the real `M` rows.
 - Exact input metadata is validated before either cache can select a graph;
   equal total rows alone are insufficient.
@@ -77,7 +77,7 @@ scalar readback in each of the 24 transformer layers.
 
 Therefore an audio request has three possible outcomes:
 
-| Runtime shape/layout | Metadata and row pack | Prefix/suffix execution |
+| Runtime shape/layout | Metadata and row pack | Audio-encoder execution |
 |---|---|---|
 | Canonical `F=2897..3000`, admitted and hot | CPU + Triton | CUDA graph replay |
 | CPU-metadata-compatible but graph-ineligible length/metadata | CPU + Triton | eager |
@@ -203,9 +203,9 @@ UV_PROJECT_ENVIRONMENT=/mnt/ssd1/shreyansh/home_dir/asr_experiments/.venv \
 uv run python -m unittest \
   tests.test_audio_cpu_metadata_pack_patch \
   tests.test_audio_cpu_maxseqlen_patch \
-  tests.test_audio_prefix_cudagraph_patch \
-  tests.test_audio_suffix_cudagraph_patch \
-  tests.test_audio_prefix_suffix_cudagraph_patch
+  tests.test_audio_frontend_cudagraph_patch \
+  tests.test_audio_transformer_cudagraph_patch \
+  tests.test_audio_encoder_cudagraph_patch
 
 uv run inference/analyse_results.py --mode batched
 uv run inference/analyse_results.py --mode sequential

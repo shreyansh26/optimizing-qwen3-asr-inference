@@ -5,7 +5,7 @@ Audience: developers working on Qwen3-ASR/vLLM batched inference kernels.
 > **Historical experiment record.** This note preserves the candidate-selection
 > evidence from round four, including the earlier 20--21 second tail graph and
 > two-bucket suffix design. The promoted branch now uses 104 natural prefix
-> keys, 14 prefix signatures, and one 390-row suffix graph; all tail shapes are
+> keys, 14 prefix signatures, and one 390-row transformer graph; all tail shapes are
 > eager. Current architecture and measurements are in the
 > [audio-length guide](../qwen3-asr-audio-length-and-graph-fast-path.md) and
 > [final benchmark report](../audio-natural-only-cudagraph-benchmark.md).
@@ -104,7 +104,7 @@ natural M in {377, ..., 390}
 The helper passed on GPU1:
 
 ```text
-gate=PASS_BUCKETED_AUDIO_SUFFIX_CUDAGRAPH
+gate=PASS_BUCKETED_AUDIO_TRANSFORMER_CUDAGRAPH
 ```
 
 Evidence:
@@ -120,7 +120,7 @@ Evidence:
 - natural replay plus input/metadata copy was about 1.641-1.663 ms versus eager
   about 7.16-7.27 ms.
 
-## Prefix CUDA graph candidates
+## Audio frontend CUDA graph candidates
 
 ### Shared-prefix pool
 
@@ -134,7 +134,7 @@ pool and transaction lock across the cache.
 The helper passed on GPU1:
 
 ```text
-gate=PASS_EXACT_NATURAL_AUDIO_PREFIX_CUDAGRAPH
+gate=PASS_EXACT_NATURAL_AUDIO_FRONTEND_CUDAGRAPH
 ```
 
 Memory after the 14-signature helper gate dropped from the original natural
@@ -239,7 +239,7 @@ CUDA_VISIBLE_DEVICES=1 \
 PORT=8091 \
 MODEL="$MODEL" \
 UV_PROJECT_ENVIRONMENT="$UV_PROJECT_ENVIRONMENT" \
-bash inference/run_vllm_fp8_static_qk_prefill_audio_prefix_suffix_cudagraph.sh \
+bash inference/run_vllm_fp8_static_audio_encoder_cudagraphs.sh \
   --gpu-memory-utilization 0.75
 ```
 

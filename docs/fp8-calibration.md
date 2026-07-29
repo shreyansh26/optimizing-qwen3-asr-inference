@@ -205,5 +205,5 @@ a scale; it does not prove that the calibration distribution is representative.
   the calibration model.
 - `inference/results/fp8_static_scales_128x50.json`: current portable scale
   artifact.
-- `inference/vllm_static_fp8/vllm_static_fp8_plugin.py`: consumer of
+- `inference/vllm_qwen3_asr_optimizations/vllm_qwen3_asr_optimization_plugin.py`: consumer of
   `vllm_fused_modules` during vLLM startup.

@@ -25,12 +25,12 @@ Unsupported layouts fall back to the original vLLM attention forward.
 
 ## Implementation
 
-- `inference/vllm_static_fp8/qk_mrope_fusion_patch.py` patches
+- `inference/vllm_static_fp8/qk_mrope_kv_cache_fusion_patch.py` patches
   `Qwen3Attention.forward` at plugin load time.
 - One Triton program handles 16 heads, computes the per-head RMS reduction,
   applies the learned RMSNorm weight, selects the temporal/height/width
   position for each frequency, and applies MRoPE.
-- `ASR_QK_MROPE_FUSION=0` disables the patch. The static-FP8 launch script
+- `ASR_QK_MROPE_KV_CACHE_FUSION=0` disables the patch. The static-FP8 launch script
   enables it by default on this branch.
 - PyTorch and vLLM versions are unchanged.
 

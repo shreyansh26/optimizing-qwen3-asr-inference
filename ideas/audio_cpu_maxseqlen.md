@@ -49,7 +49,7 @@ The service launcher is:
 
 ```bash
 CUDA_VISIBLE_DEVICES=1 PORT=8091 \
-  inference/experimental_launchers/run_vllm_fp8_static_qk_prefill_audio_cpu_maxseqlen.sh
+  inference/experimental_launchers/run_vllm_fp8_static_qk_mrope_kv_cache_fusion_audio_cpu_maxseqlen.sh
 ```
 
 End-to-end batched results are pending.
