@@ -11,7 +11,11 @@ from unittest.mock import Mock, patch
 import torch
 
 
-PATCH_DIR = Path(__file__).resolve().parents[1] / "inference" / "vllm_static_fp8"
+PATCH_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "inference"
+    / "vllm_qwen3_asr_optimizations"
+)
 sys.path.insert(0, str(PATCH_DIR))
 
 from audio_cpu_metadata_pack_patch import (  # noqa: E402

@@ -13,26 +13,30 @@ from unittest.mock import patch
 import torch
 
 
-PATCH_DIR = Path(__file__).resolve().parents[1] / "inference" / "vllm_static_fp8"
+PATCH_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "inference"
+    / "vllm_qwen3_asr_optimizations"
+)
 sys.path.insert(0, str(PATCH_DIR))
 
-import audio_prefix_cudagraph_patch as prefix_patch  # noqa: E402
+import audio_frontend_cudagraph_patch as frontend_patch  # noqa: E402
 from audio_cpu_metadata_pack_patch import (  # noqa: E402
     _build_cpu_metadata,
-    run_audio_prefix_eager,
+    run_audio_frontend_eager,
 )
-from audio_prefix_cudagraph_patch import (  # noqa: E402
+from audio_frontend_cudagraph_patch import (  # noqa: E402
     ENV_NAME,
-    ExactShapeAudioPrefixGraphCache,
+    ExactShapeAudioFrontendGraphCache,
     _NATURAL_PACKED_ROWS,
-    _NoopPrefixBackend,
+    _NoopFrontendBackend,
     _PROBATION_OBSERVATIONS,
     _TAIL_PACKED_ROWS,
     _canonical_single_audio_natural_metadata,
-    _make_prefix_graph_key,
-    _make_prefix_graph_signature,
+    _make_frontend_graph_key,
+    _make_frontend_graph_signature,
     _natural_feature_lengths_for_rows,
-    audio_prefix_cudagraph_enabled,
+    audio_frontend_cudagraph_enabled,
 )
 
 
@@ -64,7 +68,7 @@ class _FakeLinear:
         return (base + columns / 1024.0).to(inputs.dtype)
 
 
-class _FailCaptureBackend(_NoopPrefixBackend):
+class _FailCaptureBackend(_NoopFrontendBackend):
     def __init__(self) -> None:
         self.capture_calls = 0
 
@@ -73,13 +77,13 @@ class _FailCaptureBackend(_NoopPrefixBackend):
         raise RuntimeError("forced capture failure")
 
 
-class _RejectAdmissionBackend(_NoopPrefixBackend):
+class _RejectAdmissionBackend(_NoopFrontendBackend):
     def equal(self, left: torch.Tensor, right: torch.Tensor) -> bool:
         del left, right
         return False
 
 
-class _CountingPrefixBackend(_NoopPrefixBackend):
+class _CountingFrontendBackend(_NoopFrontendBackend):
     def __init__(self) -> None:
         self.capture_calls = 0
         self.replay_calls = 0
@@ -108,7 +112,7 @@ class _CountingPrefixBackend(_NoopPrefixBackend):
         super().replay(graph)
 
 
-class _TrackingReplayBackend(_NoopPrefixBackend):
+class _TrackingReplayBackend(_NoopFrontendBackend):
     def __init__(self, transaction_delay: float = 0.01) -> None:
         self.active_transactions = 0
         self.max_active_transactions = 0
@@ -224,23 +228,23 @@ def _single_audio_tail_case(
     return padded, metadata
 
 
-class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
+class AudioFrontendCudaGraphPatchTest(unittest.TestCase):
     def test_environment_gate_is_strict(self) -> None:
         with patch.dict(os.environ, {}, clear=True):
-            self.assertFalse(audio_prefix_cudagraph_enabled())
+            self.assertFalse(audio_frontend_cudagraph_enabled())
         with patch.dict(os.environ, {ENV_NAME: "1"}, clear=True):
-            self.assertTrue(audio_prefix_cudagraph_enabled())
+            self.assertTrue(audio_frontend_cudagraph_enabled())
         for value in ("", "true", "2", "-1"):
             with self.subTest(value=value):
                 with patch.dict(os.environ, {ENV_NAME: value}, clear=True):
                     with self.assertRaises(ValueError):
-                        audio_prefix_cudagraph_enabled()
+                        audio_frontend_cudagraph_enabled()
 
     def test_key_includes_full_cpu_metadata_and_padded_shape(self) -> None:
         chunk_lengths, pack_metadata, cu_seqlens, feature_lens, aftercnn_lens = (
             _metadata()
         )
-        key = _make_prefix_graph_key(
+        key = _make_frontend_graph_key(
             _padded(),
             chunk_lengths,
             pack_metadata,
@@ -259,7 +263,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
         self.assertEqual(key.aftercnn_lens_values, aftercnn_lens)
 
         altered_feature_lens = (2971,)
-        altered_key = _make_prefix_graph_key(
+        altered_key = _make_frontend_graph_key(
             _padded(),
             chunk_lengths,
             pack_metadata,
@@ -269,7 +273,9 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
         )
         self.assertNotEqual(key, altered_key)
 
-    def test_natural_single_audio_inventory_is_104_exact_keys_14_signatures(self) -> None:
+    def test_natural_inventory_has_104_exact_keys_and_14_signatures(
+        self,
+    ) -> None:
         keys = []
         signatures = set()
         expected_ranges = {
@@ -297,7 +303,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                 self.assertTrue(torch.equal(built_pack, expected_metadata[1]))
                 self.assertEqual(tuple(built_cu), expected_metadata[2])
                 padded = _natural_padded(feature_length, seed=feature_length)
-                key = _make_prefix_graph_key(
+                key = _make_frontend_graph_key(
                     padded,
                     *expected_metadata,
                 )
@@ -315,7 +321,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                 )
                 self.assertEqual(key.padded_stride, (12800, 128, 1, 128))
                 keys.append(key)
-                signatures.add(_make_prefix_graph_signature(key))
+                signatures.add(_make_frontend_graph_signature(key))
 
         self.assertEqual(len(keys), 104)
         self.assertEqual(len(set(keys)), 104)
@@ -325,7 +331,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
         feature_length = 2972
         padded = _natural_padded(feature_length)
         metadata = list(_natural_metadata(feature_length))
-        self.assertIsNotNone(_make_prefix_graph_key(padded, *metadata))
+        self.assertIsNotNone(_make_frontend_graph_key(padded, *metadata))
 
         cases = []
         altered_chunks = metadata[0].clone()
@@ -348,7 +354,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
         )
         for altered in cases:
             with self.subTest(metadata=altered[2:]):
-                self.assertIsNone(_make_prefix_graph_key(padded, *altered))
+                self.assertIsNone(_make_frontend_graph_key(padded, *altered))
 
     def test_21_chunk_tail_rows_are_not_admitted(self) -> None:
         self.assertEqual(_TAIL_PACKED_ROWS, frozenset())
@@ -365,7 +371,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                     rows,
                     seed=rows,
                 )
-                key = _make_prefix_graph_key(
+                key = _make_frontend_graph_key(
                     padded,
                     *metadata,
                 )
@@ -377,7 +383,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
             seed=262,
         )
         self.assertIsNone(
-            _make_prefix_graph_key(
+            _make_frontend_graph_key(
                 unsupported_padded,
                 *unsupported_metadata,
             )
@@ -385,8 +391,8 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
 
     def test_fake_graph_replay_is_exact_for_same_shape_different_content(self) -> None:
         encoder = _encoder()
-        cache = ExactShapeAudioPrefixGraphCache(
-            backend=_NoopPrefixBackend(),
+        cache = ExactShapeAudioFrontendGraphCache(
+            backend=_NoopFrontendBackend(),
             warmup_iterations=1,
         )
         metadata = _metadata()
@@ -407,7 +413,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                 *metadata,
                 async_tensor_h2d=None,
             )
-            reference_second = run_audio_prefix_eager(
+            reference_second = run_audio_frontend_eager(
                 encoder,
                 second,
                 *metadata,
@@ -422,8 +428,8 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
 
     def test_probation_captures_on_eighth_observation_then_replays(self) -> None:
         encoder = _encoder()
-        backend = _CountingPrefixBackend()
-        cache = ExactShapeAudioPrefixGraphCache(
+        backend = _CountingFrontendBackend()
+        cache = ExactShapeAudioFrontendGraphCache(
             backend=backend,
             warmup_iterations=1,
         )
@@ -442,7 +448,11 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                 self.assertEqual(cache.admitted_key_count, 0)
                 self.assertEqual(cache.probation_key_count, 1)
                 self.assertEqual(backend.capture_calls, 0)
-                self.assertEqual(observation, cache._probation_counts[next(iter(cache._probation_counts))])
+                observed_key = next(iter(cache._probation_counts))
+                self.assertEqual(
+                    observation,
+                    cache._probation_counts[observed_key],
+                )
             eighth = cache.run(
                 encoder,
                 padded,
@@ -456,13 +466,13 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                 *metadata,
                 async_tensor_h2d=None,
             )
-            expected_eighth = run_audio_prefix_eager(
+            expected_eighth = run_audio_frontend_eager(
                 encoder,
                 padded,
                 *metadata,
                 async_tensor_h2d=None,
             )
-            expected_ninth = run_audio_prefix_eager(
+            expected_ninth = run_audio_frontend_eager(
                 encoder,
                 replay_input,
                 *metadata,
@@ -480,8 +490,8 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
 
     def test_natural_exact_keys_share_signature_only_after_own_probation(self) -> None:
         encoder = _encoder()
-        backend = _CountingPrefixBackend()
-        cache = ExactShapeAudioPrefixGraphCache(
+        backend = _CountingFrontendBackend()
+        cache = ExactShapeAudioFrontendGraphCache(
             backend=backend,
             warmup_iterations=1,
         )
@@ -521,13 +531,13 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                 *alias_metadata,
                 async_tensor_h2d=None,
             )
-            expected_alias = run_audio_prefix_eager(
+            expected_alias = run_audio_frontend_eager(
                 encoder,
                 alias_padded,
                 *alias_metadata,
                 async_tensor_h2d=None,
             )
-            expected_replay_alias = run_audio_prefix_eager(
+            expected_replay_alias = run_audio_frontend_eager(
                 encoder,
                 replay_alias_padded,
                 *alias_metadata,
@@ -544,8 +554,8 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
 
     def test_distinct_signatures_share_one_execution_stream_and_pool(self) -> None:
         encoder = _encoder()
-        backend = _CountingPrefixBackend()
-        cache = ExactShapeAudioPrefixGraphCache(
+        backend = _CountingFrontendBackend()
+        cache = ExactShapeAudioFrontendGraphCache(
             backend=backend,
             max_entries=2,
             warmup_iterations=1,
@@ -585,8 +595,8 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
 
     def test_graph_entries_and_probation_do_not_evict(self) -> None:
         encoder = _encoder()
-        cache = ExactShapeAudioPrefixGraphCache(
-            backend=_NoopPrefixBackend(),
+        cache = ExactShapeAudioFrontendGraphCache(
+            backend=_NoopFrontendBackend(),
             max_entries=1,
             max_probation_keys=2,
             warmup_iterations=1,
@@ -616,7 +626,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                 *_natural_metadata(first_length),
                 async_tensor_h2d=None,
             )
-            reference = run_audio_prefix_eager(
+            reference = run_audio_frontend_eager(
                 encoder,
                 replay_input,
                 *_natural_metadata(first_length),
@@ -630,15 +640,15 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
 
     def test_probation_capacity_stays_bounded_without_evicting_seen_keys(self) -> None:
         encoder = _encoder()
-        cache = ExactShapeAudioPrefixGraphCache(
-            backend=_NoopPrefixBackend(),
+        cache = ExactShapeAudioFrontendGraphCache(
+            backend=_NoopFrontendBackend(),
             max_probation_keys=2,
             warmup_iterations=1,
         )
         feature_lengths = (2897, 2901, 2909)
         metadata_by_rows = [_metadata(length) for length in feature_lengths]
         keys = [
-            _make_prefix_graph_key(
+            _make_frontend_graph_key(
                 _natural_padded(length, seed=length),
                 *metadata,
             )
@@ -734,7 +744,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
             done_event=_FakeEvent(),
         )
 
-        backend = prefix_patch._TorchCudaGraphBackend()
+        backend = frontend_patch._TorchCudaGraphBackend()
         with (
             patch.object(
                 torch.cuda,
@@ -811,7 +821,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
 
         def invoke(padded_feature) -> torch.Tensor:
             barrier.wait()
-            return prefix_patch.run_audio_prefix_cudagraph(
+            return frontend_patch.run_audio_frontend_cudagraph(
                 encoder,
                 padded_feature,
                 *metadata,
@@ -819,14 +829,14 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
             )
 
         with patch.object(
-            prefix_patch,
-            "ExactShapeAudioPrefixGraphCache",
+            frontend_patch,
+            "ExactShapeAudioFrontendGraphCache",
             _SlowCache,
         ):
             with ThreadPoolExecutor(max_workers=2) as executor:
                 outputs = list(executor.map(invoke, inputs))
 
-        attached_cache = getattr(encoder, prefix_patch._CACHE_ATTR)
+        attached_cache = getattr(encoder, frontend_patch._CACHE_ATTR)
         self.assertEqual(creation_count, 1)
         self.assertEqual(attached_cache.run_calls, 2)
         for padded_feature, output in zip(inputs, outputs, strict=True):
@@ -835,7 +845,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
     def test_capture_failure_falls_closed_and_marks_key_rejected(self) -> None:
         encoder = _encoder()
         backend = _FailCaptureBackend()
-        cache = ExactShapeAudioPrefixGraphCache(
+        cache = ExactShapeAudioFrontendGraphCache(
             backend=backend,
             warmup_iterations=1,
         )
@@ -850,7 +860,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                     *metadata,
                     async_tensor_h2d=None,
                 )
-            reference = run_audio_prefix_eager(
+            reference = run_audio_frontend_eager(
                 encoder,
                 padded,
                 *metadata,
@@ -870,7 +880,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
 
     def test_bitwise_admission_failure_falls_closed(self) -> None:
         encoder = _encoder()
-        cache = ExactShapeAudioPrefixGraphCache(
+        cache = ExactShapeAudioFrontendGraphCache(
             backend=_RejectAdmissionBackend(),
             warmup_iterations=1,
         )
@@ -891,7 +901,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
     def test_two_thread_same_key_replay_is_serialized_and_exact(self) -> None:
         encoder = _encoder()
         backend = _TrackingReplayBackend()
-        cache = ExactShapeAudioPrefixGraphCache(
+        cache = ExactShapeAudioFrontendGraphCache(
             backend=backend,
             warmup_iterations=1,
         )
@@ -916,7 +926,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                     *metadata,
                     async_tensor_h2d=None,
                 )
-                reference = run_audio_prefix_eager(
+                reference = run_audio_frontend_eager(
                     encoder,
                     padded,
                     *metadata,
@@ -935,7 +945,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
     def test_two_thread_cross_signature_replay_is_serialized_and_exact(self) -> None:
         encoder = _encoder()
         backend = _TrackingReplayBackend(transaction_delay=0.01)
-        cache = ExactShapeAudioPrefixGraphCache(
+        cache = ExactShapeAudioFrontendGraphCache(
             backend=backend,
             max_entries=2,
             warmup_iterations=1,
@@ -975,7 +985,7 @@ class AudioPrefixCudaGraphPatchTest(unittest.TestCase):
                     *metadata[index],
                     async_tensor_h2d=None,
                 )
-                reference = run_audio_prefix_eager(
+                reference = run_audio_frontend_eager(
                     encoder,
                     padded,
                     *metadata[index],

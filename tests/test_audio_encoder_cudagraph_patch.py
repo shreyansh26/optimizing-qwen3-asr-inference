@@ -9,25 +9,29 @@ from unittest.mock import Mock, patch
 import torch
 
 
-PATCH_DIR = Path(__file__).resolve().parents[1] / "inference" / "vllm_static_fp8"
+PATCH_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "inference"
+    / "vllm_qwen3_asr_optimizations"
+)
 sys.path.insert(0, str(PATCH_DIR))
 
-import audio_prefix_suffix_cudagraph_patch as combined_patch  # noqa: E402
+import audio_encoder_cudagraph_patch as combined_patch  # noqa: E402
 from audio_cpu_metadata_pack_patch import (  # noqa: E402
     ENV_NAME as METADATA_ENV_NAME,
     MAX_SEQLEN_ENV_NAME,
     _PATCH_MARKER as METADATA_PATCH_MARKER,
     _make_patched_forward,
 )
-from audio_prefix_cudagraph_patch import (  # noqa: E402
-    ENV_NAME as PREFIX_ENV_NAME,
-    _PATCH_MARKER as PREFIX_PATCH_MARKER,
-    install_audio_prefix_cudagraph_patch,
+from audio_frontend_cudagraph_patch import (  # noqa: E402
+    ENV_NAME as FRONTEND_ENV_NAME,
+    _PATCH_MARKER as FRONTEND_PATCH_MARKER,
+    install_audio_frontend_cudagraph_patch,
 )
-from audio_suffix_cudagraph_patch import (  # noqa: E402
-    ENV_NAME as SUFFIX_ENV_NAME,
-    _PATCH_MARKER as SUFFIX_PATCH_MARKER,
-    install_audio_suffix_cudagraph_patch,
+from audio_transformer_cudagraph_patch import (  # noqa: E402
+    ENV_NAME as TRANSFORMER_ENV_NAME,
+    _PATCH_MARKER as TRANSFORMER_PATCH_MARKER,
+    install_audio_transformer_cudagraph_patch,
 )
 
 
@@ -35,13 +39,13 @@ def _combined_environment() -> dict[str, str]:
     return {
         MAX_SEQLEN_ENV_NAME: "1",
         METADATA_ENV_NAME: "1",
-        PREFIX_ENV_NAME: "1",
-        SUFFIX_ENV_NAME: "1",
+        FRONTEND_ENV_NAME: "1",
+        TRANSFORMER_ENV_NAME: "1",
     }
 
 
-class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
-    def test_metadata_forward_calls_prefix_then_suffix_once(self) -> None:
+class AudioEncoderCudagraphPatchTest(unittest.TestCase):
+    def test_metadata_forward_calls_frontend_then_transformer_once(self) -> None:
         events = []
 
         class _FakeEncoder:
@@ -56,7 +60,7 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
             del args
             raise AssertionError("supported input must not use original forward")
 
-        def prefix_runner(
+        def frontend_runner(
             encoder,
             padded_feature,
             chunk_lengths,
@@ -70,7 +74,7 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
             del encoder, async_tensor_h2d
             events.append(
                 (
-                    "prefix",
+                    "frontend",
                     tuple(padded_feature.shape),
                     tuple(chunk_lengths.tolist()),
                     tuple(pack_metadata.tolist()),
@@ -85,7 +89,7 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
             events.append(("metadata_h2d", tuple(values), dtype, device.type))
             return torch.tensor(values, dtype=dtype, device=device)
 
-        def suffix_runner(
+        def transformer_runner(
             encoder,
             hidden_states,
             cu_seqlens,
@@ -96,7 +100,7 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
             del encoder
             events.append(
                 (
-                    "suffix",
+                    "transformer",
                     tuple(hidden_states.shape),
                     tuple(cu_seqlens.tolist()),
                     int(max_seqlen.item()),
@@ -110,8 +114,8 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
             model_cls=_FakeEncoder,
             flash_backend=object(),
             async_tensor_h2d=async_tensor_h2d,
-            prefix_runner=prefix_runner,
-            suffix_runner=suffix_runner,
+            frontend_runner=frontend_runner,
+            transformer_runner=transformer_runner,
         )
         input_features = torch.arange(
             128 * 2,
@@ -144,7 +148,7 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
         self.assertTrue(torch.equal(output, torch.full_like(output, 3)))
         self.assertEqual(
             [event[0] for event in events],
-            ["prefix", "metadata_h2d", "max_seqlen", "suffix"],
+            ["frontend", "metadata_h2d", "max_seqlen", "transformer"],
         )
         self.assertEqual(
             events[0][1:],
@@ -156,27 +160,27 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
         with (
             patch.object(
                 combined_patch,
-                "audio_prefix_cudagraph_enabled",
+                "audio_frontend_cudagraph_enabled",
                 return_value=True,
             ),
             patch.object(
                 combined_patch,
-                "audio_suffix_cudagraph_enabled",
+                "audio_transformer_cudagraph_enabled",
                 return_value=True,
             ),
             patch.object(
                 combined_patch,
-                "install_audio_prefix_suffix_cudagraph_patch",
+                "install_audio_encoder_cudagraph_patch",
                 return_value=False,
             ) as install_combined,
             patch.object(
                 combined_patch,
-                "install_audio_prefix_cudagraph_patch",
-            ) as install_prefix,
+                "install_audio_frontend_cudagraph_patch",
+            ) as install_frontend,
             patch.object(
                 combined_patch,
-                "install_audio_suffix_cudagraph_patch",
-            ) as install_suffix,
+                "install_audio_transformer_cudagraph_patch",
+            ) as install_transformer,
             patch.object(
                 combined_patch,
                 "install_audio_cpu_metadata_pack_patch",
@@ -187,41 +191,41 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
             )
 
         install_combined.assert_called_once_with()
-        install_prefix.assert_not_called()
-        install_suffix.assert_not_called()
+        install_frontend.assert_not_called()
+        install_transformer.assert_not_called()
         install_metadata.assert_not_called()
 
     def test_dispatch_preserves_each_single_runner_path(self) -> None:
         cases = (
-            (True, False, "prefix"),
-            (False, True, "suffix"),
+            (True, False, "frontend"),
+            (False, True, "transformer"),
         )
-        for prefix_enabled, suffix_enabled, expected in cases:
+        for frontend_enabled, transformer_enabled, expected in cases:
             with self.subTest(expected=expected):
                 installers = {
-                    "prefix": Mock(return_value=True),
-                    "suffix": Mock(return_value=True),
+                    "frontend": Mock(return_value=True),
+                    "transformer": Mock(return_value=True),
                 }
                 with (
                     patch.object(
                         combined_patch,
-                        "audio_prefix_cudagraph_enabled",
-                        return_value=prefix_enabled,
+                        "audio_frontend_cudagraph_enabled",
+                        return_value=frontend_enabled,
                     ),
                     patch.object(
                         combined_patch,
-                        "audio_suffix_cudagraph_enabled",
-                        return_value=suffix_enabled,
+                        "audio_transformer_cudagraph_enabled",
+                        return_value=transformer_enabled,
                     ),
                     patch.object(
                         combined_patch,
-                        "install_audio_prefix_cudagraph_patch",
-                        installers["prefix"],
+                        "install_audio_frontend_cudagraph_patch",
+                        installers["frontend"],
                     ),
                     patch.object(
                         combined_patch,
-                        "install_audio_suffix_cudagraph_patch",
-                        installers["suffix"],
+                        "install_audio_transformer_cudagraph_patch",
+                        installers["transformer"],
                     ),
                 ):
                     self.assertTrue(
@@ -229,7 +233,7 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
                     )
 
                 installers[expected].assert_called_once_with()
-                other = "suffix" if expected == "prefix" else "prefix"
+                other = "transformer" if expected == "frontend" else "frontend"
                 installers[other].assert_not_called()
 
     def test_combined_install_is_idempotent_for_both_single_installers(self) -> None:
@@ -246,8 +250,8 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
 
         install_calls = []
 
-        def install_metadata(*, prefix_runner, suffix_runner):
-            install_calls.append((prefix_runner, suffix_runner))
+        def install_metadata(*, frontend_runner, transformer_runner):
+            install_calls.append((frontend_runner, transformer_runner))
 
             def installed_forward(self):
                 del self
@@ -280,26 +284,26 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
             ),
         ):
             self.assertTrue(
-                combined_patch.install_audio_prefix_suffix_cudagraph_patch()
+                combined_patch.install_audio_encoder_cudagraph_patch()
             )
             installed_forward = Qwen3OmniMoeAudioEncoder.forward
-            self.assertTrue(getattr(installed_forward, PREFIX_PATCH_MARKER))
-            self.assertTrue(getattr(installed_forward, SUFFIX_PATCH_MARKER))
+            self.assertTrue(getattr(installed_forward, FRONTEND_PATCH_MARKER))
+            self.assertTrue(getattr(installed_forward, TRANSFORMER_PATCH_MARKER))
             self.assertTrue(
                 getattr(installed_forward, combined_patch._PATCH_MARKER)
             )
             self.assertTrue(
-                combined_patch.install_audio_prefix_suffix_cudagraph_patch()
+                combined_patch.install_audio_encoder_cudagraph_patch()
             )
-            self.assertTrue(install_audio_prefix_cudagraph_patch())
-            self.assertTrue(install_audio_suffix_cudagraph_patch())
+            self.assertTrue(install_audio_frontend_cudagraph_patch())
+            self.assertTrue(install_audio_transformer_cudagraph_patch())
 
         self.assertEqual(
             install_calls,
             [
                 (
-                    combined_patch.run_audio_prefix_cudagraph,
-                    combined_patch.run_audio_suffix_cudagraph,
+                    combined_patch.run_audio_frontend_cudagraph,
+                    combined_patch.run_audio_transformer_cudagraph,
                 )
             ],
         )
@@ -337,7 +341,7 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
             ) as install_metadata,
         ):
             self.assertFalse(
-                combined_patch.install_audio_prefix_suffix_cudagraph_patch()
+                combined_patch.install_audio_encoder_cudagraph_patch()
             )
 
         install_metadata.assert_not_called()
@@ -348,7 +352,7 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
             Qwen3OmniMoeAudioEncoder,
         )
 
-        for marker in (PREFIX_PATCH_MARKER, SUFFIX_PATCH_MARKER):
+        for marker in (FRONTEND_PATCH_MARKER, TRANSFORMER_PATCH_MARKER):
             with self.subTest(marker=marker):
                 def single_runner_forward(self):
                     del self
@@ -382,7 +386,7 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
                     ) as install_metadata,
                 ):
                     self.assertFalse(
-                        combined_patch.install_audio_prefix_suffix_cudagraph_patch()
+                        combined_patch.install_audio_encoder_cudagraph_patch()
                     )
 
                 install_metadata.assert_not_called()
@@ -414,7 +418,7 @@ class AudioPrefixSuffixCudagraphPatchTest(unittest.TestCase):
             ),
         ):
             with self.assertRaisesRegex(RuntimeError, "partially installed"):
-                combined_patch.install_audio_prefix_suffix_cudagraph_patch()
+                combined_patch.install_audio_encoder_cudagraph_patch()
 
 
 if __name__ == "__main__":
