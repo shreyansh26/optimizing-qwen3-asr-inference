@@ -34,6 +34,23 @@ _EXPECTED_VLLM_WHEEL_HASH = (
     "sha256:597949743f2a00c0539d9e2ff0f67b32c608a378e973f99e7529fd6fa9445f70"
 )
 
+# Shape contract for the exact encoder accepted by _cpu_input_is_supported():
+#
+#   input_features: [128 mel bins, total input frames]
+#   raw chunk:      2 * n_window = 2 * 50 = 100 frames
+#   conv stack:     three stride-2 layers, so ceil(100 / 8) = 13 rows/chunk
+#   padded pack:    [num_chunks, 13 rows, 1024 hidden]
+#   packed output:  [sum(valid rows), 1024 hidden]
+#
+# The constants below describe model geometry, not launch tuning.
+_INPUT_MEL_BINS = 128
+_HIDDEN_SIZE = 1024
+_CONV_DOWNSAMPLE_STAGES = 3
+_EXPECTED_RAW_CHUNK_FRAMES = 100
+_ROWS_PER_FULL_CHUNK = (
+    _EXPECTED_RAW_CHUNK_FRAMES + (1 << _CONV_DOWNSAMPLE_STAGES) - 1
+) // (1 << _CONV_DOWNSAMPLE_STAGES)
+
 # Previous exact-source guard retained for reference. Compatibility is now
 # selected by the installed vLLM version and locked wheel hash above.
 # _EXPECTED_FORWARD_SHA256 = (
@@ -66,7 +83,18 @@ def _pack_valid_rows_kernel(
     hidden_size: tl.constexpr,
     block_hidden: tl.constexpr,
 ):
-    """Copy one padded row per program into its CPU-computed output slot."""
+    """Copy one padded row per program into its CPU-computed output slot.
+
+    padded_ptr is [num_chunks, padded_rows, hidden_size]. metadata_ptr is a
+    flat int32 tensor with two equally sized sections:
+
+      metadata[:num_chunks] = valid row count for each chunk
+      metadata[num_chunks:] = packed output row offset for each chunk
+
+    Grid = num_chunks * padded_rows, so each program owns one candidate input
+    row and vectorizes over block_hidden columns. block_hidden is the next
+    power of two above hidden_size (1024 for this model).
+    """
     program = tl.program_id(0)
     chunk = program // padded_rows
     row = program % padded_rows
@@ -141,13 +169,13 @@ def _installed_vllm_wheel_is_supported(
 
 def _expected_audio_output_lengths(feature_lens: torch.Tensor) -> torch.Tensor:
     """Mirror Qwen3-ASR's three-convolution whole-audio length formula."""
-    input_lengths_leave = feature_lens % 100
-    feat_lengths = (input_lengths_leave - 1) // 2 + 1
-    return (
-        ((feat_lengths - 1) // 2 + 1 - 1) // 2
-        + 1
-        + (feature_lens // 100) * 13
-    )
+    full_chunks = feature_lens // _EXPECTED_RAW_CHUNK_FRAMES
+    tail_rows = feature_lens % _EXPECTED_RAW_CHUNK_FRAMES
+    # kernel=3, stride=2, padding=1 gives ceil(length / 2), expressed in the
+    # integer form used by the upstream model. Apply it once per convolution.
+    for _ in range(_CONV_DOWNSAMPLE_STAGES):
+        tail_rows = (tail_rows - 1) // 2 + 1
+    return tail_rows + full_chunks * _ROWS_PER_FULL_CHUNK
 
 
 def _cpu_input_is_supported(
@@ -174,7 +202,7 @@ def _cpu_input_is_supported(
         or input_features.ndim != 2
         or not input_features.is_cuda
         or input_features.dtype != torch.bfloat16
-        or input_features.shape[0] != 128
+        or input_features.shape[0] != _INPUT_MEL_BINS
     ):
         return False
     for lengths in (feature_lens, aftercnn_lens):
@@ -223,7 +251,7 @@ def _build_cpu_metadata(
     chunk_lengths[chunk_lengths == 0] = raw_chunk_size
 
     pack_lengths = chunk_lengths
-    for _ in range(3):
+    for _ in range(_CONV_DOWNSAMPLE_STAGES):
         pack_lengths = (pack_lengths - 1) // 2 + 1
     pack_length_values = [int(value) for value in pack_lengths.tolist()]
     pack_offsets = [0, *accumulate(pack_length_values)]
@@ -265,7 +293,7 @@ def pack_valid_rows(
         padded.ndim != 3
         or not padded.is_cuda
         or padded.dtype != torch.bfloat16
-        or padded.shape[2] != 1024
+        or padded.shape[2] != _HIDDEN_SIZE
         or pack_metadata_cpu.device.type != "cpu"
         or pack_metadata_cpu.dtype != torch.int32
         or pack_metadata_cpu.ndim != 1
@@ -296,11 +324,17 @@ def pack_valid_rows(
         dtype=torch.int32,
         device=padded.device,
     )
+    # The launch covers every padded row; the metadata-derived row mask drops
+    # invalid tail rows. The output is contiguous, so its row stride is exactly
+    # hidden_size and does not need to be passed separately.
     block_hidden = triton.next_power_of_2(hidden_size)
-    _pack_valid_rows_kernel[(num_chunks * padded_rows,)](
+    grid = (num_chunks * padded_rows,)
+    _pack_valid_rows_kernel[grid](
         padded,
         metadata,
         output,
+        # Read the live view strides. For contiguous [chunks, 13, 1024], these
+        # are [13 * 1024 = 13312, 1024, 1].
         padded.stride(0),
         padded.stride(1),
         padded.stride(2),
@@ -442,6 +476,9 @@ def _make_patched_forward(
             n_window_infer=self.n_window_infer,
         )
 
+        # input_features.T is [total_frames, 128]. Splitting by CPU-computed
+        # chunk lengths and padding produces [chunks, 100, 128]; transpose and
+        # unsqueeze convert it to Conv2d's [chunks, 1, 128, 100].
         chunk_list = input_features.T.split(chunk_lengths.tolist(), dim=0)
         padded_feature = nn.utils.rnn.pad_sequence(
             chunk_list,

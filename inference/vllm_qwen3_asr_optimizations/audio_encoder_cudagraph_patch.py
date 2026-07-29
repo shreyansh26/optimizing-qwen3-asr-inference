@@ -1,4 +1,17 @@
-"""Install the audio frontend and transformer CUDA graphs together."""
+"""Install the audio frontend and transformer CUDA graphs together.
+
+The combined patch preserves one visible tensor pipeline:
+
+  [128, total_frames] mel features
+    -> CPU-derived chunk/pack/attention metadata
+    -> [chunks, 1, 128, 100] padded frontend input
+    -> [packed_rows, 1024] packed frontend output
+    -> [packed_rows, 2048] audio-transformer projection output
+
+This module only composes the shape-owning patches; the derivations and guards
+live beside their kernels in audio_cpu_metadata_pack_patch.py,
+audio_frontend_cudagraph_patch.py, and audio_transformer_cudagraph_patch.py.
+"""
 
 from __future__ import annotations
 

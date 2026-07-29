@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 import torch
 
+from audio_cpu_maxseqlen_patch import STATIC_MAX_SEQLEN
 from audio_cpu_metadata_pack_patch import (
     ENV_NAME as METADATA_ENV_NAME,
     MAX_SEQLEN_ENV_NAME,
@@ -26,14 +27,36 @@ ENV_NAME = "ASR_AUDIO_TRANSFORMER_CUDAGRAPH"
 _PATCH_MARKER = "_asr_audio_transformer_cudagraph_patch"
 _CACHE_ATTR = "_asr_audio_transformer_cudagraph_cache"
 _CACHE_CREATION_LOCK = threading.Lock()
+
+# Exact transformer contract after the frontend pack:
+#
+#   hidden_states: [rows, 1024]
+#   cu_seqlens:    [0, 104, 208, 312, rows] for admitted 377--390 rows
+#   max_seqlen:    scalar int32 CPU tensor containing 104
+#   output:         [rows, 2048]
+#
+# Frontend geometry supplies 13 rows per full 100-frame chunk. Natural
+# 29--30-chunk inputs therefore contain 29*13=377 through 30*13=390 rows.
 _EXPECTED_LAYER_COUNT = 24
 _INPUT_WIDTH = 1024
-_OUTPUT_WIDTH = 2048
-_EXPECTED_MAX_SEQLEN = 104
+_OUTPUT_WIDTH = 2 * _INPUT_WIDTH
+_EXPECTED_MAX_SEQLEN = STATIC_MAX_SEQLEN
+_RAW_CHUNK_FRAMES = 100
+_CONV_DOWNSAMPLE_FACTOR = 1 << 3  # three stride-2 convolutions
+_ROWS_PER_FULL_CHUNK = (
+    _RAW_CHUNK_FRAMES + _CONV_DOWNSAMPLE_FACTOR - 1
+) // _CONV_DOWNSAMPLE_FACTOR
+_MIN_NATURAL_CHUNKS = 29
+_MAX_NATURAL_CHUNKS = 30
 _TAIL_ROWS = frozenset()
-_NATURAL_FULL_CHUNK_ROWS = frozenset(range(377, 391))
+_NATURAL_FULL_CHUNK_ROWS = frozenset(
+    range(
+        _MIN_NATURAL_CHUNKS * _ROWS_PER_FULL_CHUNK,
+        _MAX_NATURAL_CHUNKS * _ROWS_PER_FULL_CHUNK + 1,
+    )
+)
 _SUPPORTED_ROWS = _NATURAL_FULL_CHUNK_ROWS
-_NATURAL_BUCKET_ROWS = 390
+_NATURAL_BUCKET_ROWS = _MAX_NATURAL_CHUNKS * _ROWS_PER_FULL_CHUNK
 _MAX_CACHE_ENTRIES = 1
 _WARMUP_ITERATIONS = 3
 _PROBATION_OBSERVATIONS = 8
@@ -90,7 +113,9 @@ def audio_transformer_cudagraph_enabled() -> bool:
 
 def _canonical_cu_seqlens_values(rows: int) -> tuple[int, ...] | None:
     if rows in _NATURAL_FULL_CHUNK_ROWS:
-        return (0, 104, 208, 312, rows)
+        # range() yields the complete 104-row attention windows; appending rows
+        # adds the final 65--78-row tail endpoint.
+        return (*range(0, rows, _EXPECTED_MAX_SEQLEN), rows)
     return None
 
 
@@ -106,6 +131,8 @@ def _make_bucket_key(key: TransformerGraphKey) -> TransformerBucketKey:
         raise ValueError("Unsupported exact transformer key cannot select a bucket")
     return TransformerBucketKey(
         bucket_rows=bucket_rows,
+        # The graph adds its fixed bucket endpoint after the runtime
+        # cu_seqlens, including an intentional duplicate when rows == 390.
         graph_cu_seqlens_numel=key.cu_seqlens_numel + 1,
         dtype=key.dtype,
         device_type=key.device_type,
@@ -423,7 +450,7 @@ class ExactShapeAudioTransformerGraphCache:
             ):
                 raise RuntimeError(
                     "Captured bucketed audio transformer did not return "
-                    "[bucket_rows, 2048]"
+                    f"[bucket_rows, {_OUTPUT_WIDTH}]"
                 )
 
             entry = _TransformerGraphEntry(

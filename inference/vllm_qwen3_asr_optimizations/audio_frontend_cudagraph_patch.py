@@ -28,17 +28,58 @@ ENV_NAME = "ASR_AUDIO_FRONTEND_CUDAGRAPH"
 _PATCH_MARKER = "_asr_audio_frontend_cudagraph_patch"
 _CACHE_ATTR = "_asr_audio_frontend_cudagraph_cache"
 _CACHE_CREATION_LOCK = threading.Lock()
+
+# Exact Qwen3-ASR frontend geometry:
+#
+#   padded_feature: [chunks, 1 channel, 128 mel bins, 100 frames]
+#   three stride-2 convolutions:
+#       100 -> 50 -> 25 -> 13 time rows
+#   conv_out:       [chunks, 13, 1024]
+#   packed output:  [sum(valid rows), 1024]
+#
+# A 29--30 second natural request contains 29 or 30 raw chunks.  Full chunks
+# contribute 13 rows, so admitted packed row counts span 29*13=377 through
+# 30*13=390. These calculations are kept executable below.
 _INPUT_CHANNELS = 1
 _INPUT_MELS = 128
 _INPUT_FRAMES = 100
 _PACKED_WIDTH = 1024
-_CONV_OUTPUT_ROWS = 13
+_CONV_DOWNSAMPLE_STAGES = 3
+_CONV_DOWNSAMPLE_FACTOR = 1 << _CONV_DOWNSAMPLE_STAGES
+_CONV_OUTPUT_ROWS = (
+    _INPUT_FRAMES + _CONV_DOWNSAMPLE_FACTOR - 1
+) // _CONV_DOWNSAMPLE_FACTOR
+_MIN_NATURAL_CHUNKS = 29
+_MAX_NATURAL_CHUNKS = 30
 _TAIL_PACKED_ROWS = frozenset()
-_NATURAL_PACKED_ROWS = frozenset(range(377, 391))
+_NATURAL_PACKED_ROWS = frozenset(
+    range(
+        _MIN_NATURAL_CHUNKS * _CONV_OUTPUT_ROWS,
+        _MAX_NATURAL_CHUNKS * _CONV_OUTPUT_ROWS + 1,
+    )
+)
 _SUPPORTED_PACKED_ROWS = _NATURAL_PACKED_ROWS
-_SUPPORTED_CHUNKS = frozenset({29, 30})
-_NATURAL_FEATURE_LENGTH_MIN = 2897
-_NATURAL_FEATURE_LENGTH_MAX = 3000
+_SUPPORTED_CHUNKS = frozenset(
+    range(_MIN_NATURAL_CHUNKS, _MAX_NATURAL_CHUNKS + 1)
+)
+
+# Admission policy for the benchmark's nominal 30-second audio family.  Mel
+# frames are 10 ms apart: 2897--3000 frames corresponds to 28.97--30.00 s.
+_NATURAL_FEATURE_LENGTH_MIN = _MIN_NATURAL_CHUNKS * _INPUT_FRAMES - 3
+_NATURAL_FEATURE_LENGTH_MAX = _MAX_NATURAL_CHUNKS * _INPUT_FRAMES
+_BASELINE_PACKED_ROWS = _MIN_NATURAL_CHUNKS * _CONV_OUTPUT_ROWS
+_ROW_TO_MAX_FEATURE_BIAS = (
+    _MIN_NATURAL_CHUNKS * _INPUT_FRAMES
+    - _BASELINE_PACKED_ROWS * _CONV_DOWNSAMPLE_FACTOR
+)
+_ROW_TO_MIN_FEATURE_BIAS = (
+    _ROW_TO_MAX_FEATURE_BIAS - _CONV_DOWNSAMPLE_FACTOR + 1
+)
+
+# Attention groups at most eight 100-frame chunks. Each contributes 13 rows:
+# 8 * 13 = 104 rows per attention sequence.
+_CHUNKS_PER_ATTENTION_WINDOW = 8
+_ATTENTION_WINDOW_ROWS = _CHUNKS_PER_ATTENTION_WINDOW * _CONV_OUTPUT_ROWS
 _MAX_CACHE_ENTRIES = len(_SUPPORTED_PACKED_ROWS)
 _MAX_PROBATION_KEYS = (
     _NATURAL_FEATURE_LENGTH_MAX - _NATURAL_FEATURE_LENGTH_MIN + 1
@@ -60,6 +101,12 @@ def _pack_valid_rows_device_kernel(
     hidden_size: tl.constexpr,
     block_hidden: tl.constexpr,
 ):
+    """Pack valid [chunk, row, hidden] data using device-resident metadata.
+
+    metadata_ptr stores [valid_rows_per_chunk | output_offset_per_chunk], each
+    section having num_chunks int32 entries. Grid = num_chunks * padded_rows:
+    one program owns one candidate row and vectorizes over block_hidden columns.
+    """
     program = tl.program_id(0)
     chunk = program // padded_rows
     row = program % padded_rows
@@ -161,8 +208,17 @@ def _natural_feature_lengths_for_rows(packed_rows: int) -> tuple[int, ...]:
     """Return every single-audio feature length for one admitted natural row."""
     if packed_rows not in _NATURAL_PACKED_ROWS:
         return ()
-    first = max(_NATURAL_FEATURE_LENGTH_MIN, packed_rows * 8 - 123)
-    last = min(_NATURAL_FEATURE_LENGTH_MAX, packed_rows * 8 - 116)
+    # For the 29-full-chunk baseline, row 377 ends at frame 2900. Every next
+    # packed row represents the next group of up to eight input frames because
+    # three stride-2 convolutions downsample by 2**3=8.
+    first = max(
+        _NATURAL_FEATURE_LENGTH_MIN,
+        packed_rows * _CONV_DOWNSAMPLE_FACTOR + _ROW_TO_MIN_FEATURE_BIAS,
+    )
+    last = min(
+        _NATURAL_FEATURE_LENGTH_MAX,
+        packed_rows * _CONV_DOWNSAMPLE_FACTOR + _ROW_TO_MAX_FEATURE_BIAS,
+    )
     return tuple(range(first, last + 1))
 
 
@@ -198,7 +254,7 @@ def _canonical_single_audio_natural_metadata(
     return (
         chunk_lengths,
         pack_lengths + tuple(offsets[:-1]),
-        (0, 104, 208, 312, packed_rows),
+        (*range(0, packed_rows, _ATTENTION_WINDOW_ROWS), packed_rows),
         (feature_length,),
         (packed_rows,),
     )
@@ -372,10 +428,13 @@ def pack_valid_rows_from_device_metadata(
             dtype=padded.dtype,
         )
         block_hidden = triton.next_power_of_2(hidden_size)
-        _pack_valid_rows_device_kernel[(num_chunks * padded_rows,)](
+        grid = (num_chunks * padded_rows,)
+        _pack_valid_rows_device_kernel[grid](
             padded,
             metadata,
             output,
+            # For contiguous [chunks, 13, 1024], these live strides are
+            # [13 * 1024 = 13312, 1024, 1].
             padded.stride(0),
             padded.stride(1),
             padded.stride(2),
@@ -407,6 +466,9 @@ def run_audio_frontend_with_device_metadata(
     padded_embed = F.gelu(encoder.conv2d2(padded_embed))
     padded_embed = F.gelu(encoder.conv2d3(padded_embed))
 
+    # Conv output is [chunks, 480 channels, frequency, 13 time rows].
+    # Move time next to batch and flatten channels*frequency for conv_out;
+    # conv_out produces the model-width [chunks, 13, 1024] tensor.
     batch, channels, frequency, time = padded_embed.size()
     padded_embed = encoder.conv_out(
         padded_embed.permute(0, 3, 1, 2)

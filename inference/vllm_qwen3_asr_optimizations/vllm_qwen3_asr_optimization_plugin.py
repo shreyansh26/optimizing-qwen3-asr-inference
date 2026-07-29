@@ -1,4 +1,18 @@
-"""Out-of-tree vLLM optimization plugin for Qwen3-ASR."""
+"""Out-of-tree vLLM optimization plugin for Qwen3-ASR.
+
+The plugin installs three independent optimization families:
+
+  static FP8 linears:
+      calibrated scalar activation scale + layer-specific FP8 weight matrix
+  fused decoder attention preprocessing:
+      packed BF16 QKV -> RMSNorm + mROPE -> BF16 Q/K and paged KV cache
+  audio encoder fast paths:
+      [128, frames] mel input -> [rows, 1024] transformer input
+      -> [rows, 2048] projected audio embeddings
+
+Detailed tensor dimensions and their derivations live next to the corresponding
+kernel or graph launch rather than in this installation/orchestration module.
+"""
 
 from __future__ import annotations
 
@@ -133,7 +147,13 @@ def _load_scale_table(path: Path) -> tuple[dict[str, float], str]:
 
 
 class StaticPerTensorOnlineLinearMethod(Fp8PerTensorOnlineLinearMethod):
-    """Online FP8 weights with one fixed activation scale per linear layer."""
+    """Online FP8 weights with one fixed activation scale per linear layer.
+
+    ``static_input_scale`` is one Python float per complete activation tensor,
+    not a per-row or per-channel vector. process_weights_after_loading()
+    materializes it as a zero-dimensional FP32 tensor on the weight device,
+    matching vLLM's static per-tensor FP8 kernel contract.
+    """
 
     def __init__(
         self,

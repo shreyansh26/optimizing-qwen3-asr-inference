@@ -10,7 +10,24 @@ import torch
 
 
 ENV_NAME = "ASR_AUDIO_CPU_MAXSEQLEN"
-STATIC_MAX_SEQLEN = 104
+
+# Exact Qwen3-ASR-1.7B audio geometry guarded by _is_supported_encoder().
+# One raw encoder chunk contains n_window * 2 = 50 * 2 = 100 mel frames.
+# Three stride-2 convolutions reduce a full chunk to ceil(100 / 2**3) = 13
+# rows.  An inference attention window spans 800 / 100 = 8 such chunks, hence
+# the maximum sequence length is 13 * 8 = 104.  This derivation is why the CPU
+# constant can replace a GPU max()/item() readback only for this exact model.
+_EXPECTED_N_WINDOW = 50
+_EXPECTED_N_WINDOW_INFER = 800
+_EXPECTED_NUM_MEL_BINS = 128
+_EXPECTED_MAX_SOURCE_POSITIONS = 1500
+_CONV_DOWNSAMPLE_STAGES = 3
+_RAW_CHUNK_FRAMES = _EXPECTED_N_WINDOW * 2
+_ROWS_PER_FULL_CHUNK = (
+    _RAW_CHUNK_FRAMES + (1 << _CONV_DOWNSAMPLE_STAGES) - 1
+) // (1 << _CONV_DOWNSAMPLE_STAGES)
+_CHUNKS_PER_ATTENTION_WINDOW = _EXPECTED_N_WINDOW_INFER // _RAW_CHUNK_FRAMES
+STATIC_MAX_SEQLEN = _ROWS_PER_FULL_CHUNK * _CHUNKS_PER_ATTENTION_WINDOW
 _STATIC_MAX_SEQLEN_CPU = torch.tensor(
     STATIC_MAX_SEQLEN,
     dtype=torch.int32,
@@ -48,10 +65,11 @@ def _is_supported_encoder(
     if type(encoder) is not model_cls or encoder.attn_backend != flash_backend:
         return False
     if (
-        getattr(encoder, "n_window", None) != 50
-        or getattr(encoder, "n_window_infer", None) != 800
-        or getattr(encoder, "num_mel_bins", None) != 128
-        or getattr(encoder, "max_source_positions", None) != 1500
+        getattr(encoder, "n_window", None) != _EXPECTED_N_WINDOW
+        or getattr(encoder, "n_window_infer", None) != _EXPECTED_N_WINDOW_INFER
+        or getattr(encoder, "num_mel_bins", None) != _EXPECTED_NUM_MEL_BINS
+        or getattr(encoder, "max_source_positions", None)
+        != _EXPECTED_MAX_SOURCE_POSITIONS
     ):
         return False
 
