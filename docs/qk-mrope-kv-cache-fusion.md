@@ -126,6 +126,42 @@ and sine values, normalizes the paired dimension, and applies the rotary
 transform while values are still FP32. The final Q and K tensors are written
 in their original BF16 layouts.
 
+#### Dimension versus rotary frequency
+
+Here, “frequency” means a **rotary-pair index**, not one individual head
+dimension. A 128-dimensional attention head has 64 rotary pairs:
+
+```python
+dimension = d                   # 0 ... 127: one scalar head channel
+frequency = d % 64              # 0 ... 63: one rotary-pair index
+partner = (d + 64) % 128
+```
+
+Consequently, dimensions `f` and `f + 64` share one frequency index, one MRoPE
+axis, and the same cosine and sine:
+
+```text
+head dimension:  0  1  2 ... 63 | 64 65 66 ... 127
+frequency index: 0  1  2 ... 63 |  0  1  2 ...  63
+rotary pairs:   (0,64), (1,65), (2,66), ... , (63,127)
+```
+
+For pair `f`, the kernel performs the two-dimensional rotation:
+
+```python
+a = normalized[f]
+b = normalized[f + 64]
+
+rotated[f]      = a * cos_f - b * sin_f
+rotated[f + 64] = b * cos_f + a * sin_f
+```
+
+The numeric angular frequency is a separate value, conventionally written
+`omega[f]`. Position supplies the phase `position * omega[f]`; the
+`cos_sin_cache` stores the resulting cosine and sine. MRoPE changes which
+position coordinate—temporal, height, or width—is used for each pair. It does
+not turn the two dimensions in a pair into separate frequencies.
+
 ### Paged KV-cache write
 
 For each token, the kernel reads vLLM's `slot_mapping`. A non-negative slot is
